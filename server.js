@@ -41,7 +41,11 @@ async function teslaTokenExchange(params) {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams(params).toString(),
   });
-  if (!r.ok) throw new Error('Token exchange failed');
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    console.error('Tesla token error:', body);
+    throw new Error(body.error_description || body.error || 'Token exchange failed');
+  }
   return r.json();
 }
 
@@ -218,7 +222,7 @@ app.post('/api/sweep-check', wrap(async (req, res) => {
 app.post('/api/oauth/start', (req, res) => {
   const { client_id, redirect_uri, scope = 'openid offline_access vehicle_device_data vehicle_location' } = req.body;
   const state = randomBytes(32).toString('base64url');
-  const params = new URLSearchParams({ response_type: 'code', client_id, redirect_uri, scope, state });
+  const params = new URLSearchParams({ response_type: 'code', client_id, redirect_uri, scope, state, prompt: 'login', locale: 'en-US' });
   res.json({ url: `https://auth.tesla.com/oauth2/v3/authorize?${params}`, state });
 });
 
