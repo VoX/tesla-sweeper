@@ -90,10 +90,13 @@ function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
           <h3>Upcoming Sweeping Events</h3>
           {data.sweep_events.slice(0, 8).map((evt, i) => {
             const yourSide = data.car_side && (evt.side === data.car_side || evt.side === 'both');
+            const evtDate = new Date(evt.date + 'T12:00:00');
+            const daysAway = Math.round((evtDate - new Date(new Date().toDateString())) / 86400000);
+            const daysLabel = daysAway === 0 ? 'today' : daysAway === 1 ? 'tomorrow' : `${daysAway} days`;
             return (
               <div className={`event ${yourSide ? 'event-yours' : 'event-other'}`} key={i}>
                 <span className="event-date">
-                  {new Date(evt.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                  {evtDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })} ({daysLabel})
                   {yourSide && <span className="event-badge">YOUR SIDE</span>}
                 </span>
                 <span className="event-side">{evt.side} side &middot; {evt.time}</span>
