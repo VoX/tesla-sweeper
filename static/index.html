@@ -69,7 +69,7 @@ footer{text-align:center;color:#484f58;font-size:0.75rem;margin-top:24px;padding
       <label for="address">Street Address in Somerville</label>
       <input type="text" id="address" placeholder="e.g. 11 Harvard St">
     </div>
-    <button onclick="checkAddress()">Check Sweeping Schedule</button>
+    <button onclick="checkAddress(this)">Check Sweeping Schedule</button>
   </div>
 
   <div id="tab-oauth" class="tab-content">
@@ -94,7 +94,7 @@ footer{text-align:center;color:#484f58;font-size:0.75rem;margin-top:24px;padding
       <label for="token">Tesla API Bearer Token</label>
       <input type="password" id="token" placeholder="Paste your Tesla bearer token...">
     </div>
-    <button onclick="checkTesla()">Check My Car</button>
+    <button onclick="checkTesla(this)">Check My Car</button>
   </div>
 
   <p class="error" id="error"></p>
@@ -154,7 +154,11 @@ async function handleOAuthCallback() {
   if (!code) return;
 
   const savedState = sessionStorage.getItem('tesla_oauth_state');
-  if (state && savedState && state !== savedState) {
+  if (!state || !savedState) {
+    showError('OAuth state missing — possible CSRF. Try starting the flow again.');
+    return;
+  }
+  if (state !== savedState) {
     showError('OAuth state mismatch — possible CSRF. Try again.');
     return;
   }
@@ -185,7 +189,7 @@ async function handleOAuthCallback() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Token exchange failed');
 
-    statusEl.innerHTML = '✅ Connected! Token obtained. Checking your car...';
+    statusEl.textContent = '\u2705 Connected! Token obtained. Checking your car...';
 
     // Auto-fill token and check
     document.getElementById('token').value = data.access_token;
@@ -197,7 +201,7 @@ async function handleOAuthCallback() {
     sessionStorage.removeItem('tesla_redirect_uri');
     sessionStorage.removeItem('tesla_oauth_state');
   } catch (e) {
-    statusEl.innerHTML = `❌ ${e.message}`;
+    statusEl.textContent = '\u274C ' + e.message;
   }
 }
 
@@ -221,38 +225,37 @@ async function checkTeslaWithToken(token) {
     showMap(vehicle.latitude, vehicle.longitude, geo.street || 'Unknown');
 
     const addr = `${geo.house_number} ${geo.street}`.trim();
-    if (!addr || addr === ' ') { showStatus('info', 'Location Found', `Car at ${vehicle.latitude.toFixed(5)}, ${vehicle.longitude.toFixed(5)} but couldn't determine street.`); return; }
+    if (!addr || addr === ' ') { showStatus('info', 'Location Found', 'Car at ' + vehicle.latitude.toFixed(5) + ', ' + vehicle.longitude.toFixed(5) + " but couldn't determine street."); return; }
 
     const sweepRes = await fetch('/api/sweep-check', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({address: addr})
+      body: JSON.stringify({address: addr, tz_offset: new Date().getTimezoneOffset()})
     });
     const sweepData = await sweepRes.json();
     if (sweepData.found) {
       showSweepResults(sweepData, vehicle.vehicle_name, geo.display_name, vehicle.latitude, vehicle.longitude);
     } else {
-      showStatus('info', 'Street Not Found', `"${addr}" not in Somerville sweeping database.`);
+      showStatus('info', 'Street Not Found', '"' + addr + '" not in Somerville sweeping database.');
     }
   } catch (e) {
     showError(e.message);
   }
 }
 
-async function checkAddress() {
+async function checkAddress(btn) {
   const address = document.getElementById('address').value.trim();
   if (!address) { showError('Please enter an address'); return; }
 
-  const btn = event.target;
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>Checking...';
+  btn.textContent = 'Checking...';
   hideResults();
 
   try {
     const res = await fetch('/api/sweep-check', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({address})
+      body: JSON.stringify({address, tz_offset: new Date().getTimezoneOffset()})
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'API error');
@@ -267,13 +270,12 @@ async function checkAddress() {
   }
 }
 
-async function checkTesla() {
+async function checkTesla(btn) {
   const token = document.getElementById('token').value.trim();
   if (!token) { showError('Please enter your Tesla bearer token'); return; }
 
-  const btn = event.target;
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>Checking...';
+  btn.textContent = 'Checking...';
   hideResults();
 
   try {
@@ -304,7 +306,7 @@ async function checkTesla() {
     const sweepRes = await fetch('/api/sweep-check', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({address: addr})
+      body: JSON.stringify({address: addr, tz_offset: new Date().getTimezoneOffset()})
     });
     const sweepData = await sweepRes.json();
     if (!sweepRes.ok) throw new Error(sweepData.detail || 'Sweep check failed');
@@ -312,7 +314,7 @@ async function checkTesla() {
     if (sweepData.found) {
       showSweepResults(sweepData, vehicle.vehicle_name, geo.display_name, vehicle.latitude, vehicle.longitude);
     } else {
-      showStatus('info', 'Street Not Found', `"${addr}" not found in Somerville sweeping database. Check posted signs.`);
+      showStatus('info', 'Street Not Found', '"' + addr + '" not found in Somerville sweeping database. Check posted signs.');
     }
   } catch (e) {
     showError(e.message);
@@ -332,7 +334,26 @@ function showMap(lat, lng, street) {
     map.setView([lat, lng], 17);
     marker.setLatLng([lat, lng]);
   }
-  marker.bindPopup(`<b>Your Car</b><br>${street}`).openPopup();
+  const popupEl = document.createElement('div');
+  const b = document.createElement('b');
+  b.textContent = 'Your Car';
+  popupEl.appendChild(b);
+  popupEl.appendChild(document.createElement('br'));
+  popupEl.appendChild(document.createTextNode(street));
+  marker.bindPopup(popupEl).openPopup();
+}
+
+function makeRow(label, value) {
+  const row = document.createElement('div');
+  row.className = 'row';
+  const lbl = document.createElement('span');
+  lbl.className = 'label';
+  lbl.textContent = label;
+  const val = document.createElement('span');
+  val.textContent = value;
+  row.appendChild(lbl);
+  row.appendChild(val);
+  return row;
 }
 
 function showSweepResults(data, vehicleName, fullAddr, lat, lng) {
@@ -342,30 +363,51 @@ function showSweepResults(data, vehicleName, fullAddr, lat, lng) {
   if (data.sweep_events && data.sweep_events.length > 0) {
     const el = document.getElementById('upcoming');
     el.style.display = 'block';
-    let html = '<h3>Upcoming Sweeping Events</h3>';
+    el.textContent = '';
+    const h3 = document.createElement('h3');
+    h3.textContent = 'Upcoming Sweeping Events';
+    el.appendChild(h3);
     for (const evt of data.sweep_events.slice(0, 8)) {
       const d = new Date(evt.date + 'T12:00:00');
       const dayName = d.toLocaleDateString('en-US', {weekday: 'short', month: 'short', day: 'numeric'});
-      html += `<div class="event"><span class="event-date">${dayName}</span><span class="event-side">${evt.side} side · ${evt.time}</span></div>`;
+      const evDiv = document.createElement('div');
+      evDiv.className = 'event';
+      const dateSpan = document.createElement('span');
+      dateSpan.className = 'event-date';
+      dateSpan.textContent = dayName;
+      const sideSpan = document.createElement('span');
+      sideSpan.className = 'event-side';
+      sideSpan.textContent = evt.side + ' side \u00B7 ' + evt.time;
+      evDiv.appendChild(dateSpan);
+      evDiv.appendChild(sideSpan);
+      el.appendChild(evDiv);
     }
-    el.innerHTML = html;
   }
 
   // Show details
   const details = document.getElementById('details');
   details.style.display = 'block';
-  let html = '<h3>Details</h3>';
-  html += `<div class="row"><span class="label">Address</span><span>${data.place_name || fullAddr || ''}</span></div>`;
-  if (vehicleName) html += `<div class="row"><span class="label">Vehicle</span><span>${vehicleName}</span></div>`;
-  if (lat) html += `<div class="row"><span class="label">Coordinates</span><span>${lat.toFixed(5)}, ${lng.toFixed(5)}</span></div>`;
-  html += `<div class="row"><span class="label">Data Source</span><span>City of Somerville / Recollect</span></div>`;
-  details.innerHTML = html;
+  details.textContent = '';
+  const dh3 = document.createElement('h3');
+  dh3.textContent = 'Details';
+  details.appendChild(dh3);
+  details.appendChild(makeRow('Address', data.place_name || fullAddr || ''));
+  if (vehicleName) details.appendChild(makeRow('Vehicle', vehicleName));
+  if (lat) details.appendChild(makeRow('Coordinates', lat.toFixed(5) + ', ' + lng.toFixed(5)));
+  details.appendChild(makeRow('Data Source', 'City of Somerville / Recollect'));
 }
 
 function showStatus(level, title, msg) {
   const el = document.getElementById('status');
   el.className = level;
-  el.innerHTML = `<h2>${level === 'danger' ? '🚨' : level === 'warning' ? '⚠️' : level === 'safe' ? '✅' : 'ℹ️'} ${title}</h2><p>${msg}</p>`;
+  el.textContent = '';
+  const icon = level === 'danger' ? '\u{1F6A8}' : level === 'warning' ? '\u26A0\uFE0F' : level === 'safe' ? '\u2705' : '\u2139\uFE0F';
+  const h2 = document.createElement('h2');
+  h2.textContent = icon + ' ' + title;
+  const p = document.createElement('p');
+  p.textContent = msg;
+  el.appendChild(h2);
+  el.appendChild(p);
   el.style.display = 'block';
 }
 
@@ -383,8 +425,8 @@ function hideResults() {
 }
 
 // Enter key triggers check
-document.getElementById('address').addEventListener('keydown', e => { if (e.key === 'Enter') checkAddress(); });
-document.getElementById('token').addEventListener('keydown', e => { if (e.key === 'Enter') checkTesla(); });
+document.getElementById('address').addEventListener('keydown', e => { if (e.key === 'Enter') { const btn = e.target.closest('.tab-content').querySelector('button'); checkAddress(btn); } });
+document.getElementById('token').addEventListener('keydown', e => { if (e.key === 'Enter') { const btn = e.target.closest('.tab-content').querySelector('button'); checkTesla(btn); } });
 
 // Set default redirect URI
 document.getElementById('oauth-redirect').value = window.location.href.split('?')[0].split('#')[0];

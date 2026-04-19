@@ -4,8 +4,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import httpx
+import re
+import secrets
 
 app = FastAPI()
 
@@ -27,6 +29,7 @@ class GeocodeRequest(BaseModel):
 
 class SweepRequest(BaseModel):
     address: str
+    tz_offset: int | None = None  # minutes offset from UTC (from JS getTimezoneOffset())
 
 
 @app.post("/api/check")
@@ -64,6 +67,11 @@ async def check_vehicle(req: CheckRequest):
         except httpx.RequestError as e:
             raise HTTPException(status_code=502, detail=f"Failed to get vehicle data: {e}")
 
+        if loc_resp.status_code == 408:
+            raise HTTPException(
+                status_code=408,
+                detail="Your vehicle is asleep. Open the Tesla app to wake it, then try again in a minute.",
+            )
         if loc_resp.status_code != 200:
             raise HTTPException(status_code=loc_resp.status_code, detail=f"Tesla vehicle data error: {loc_resp.text}")
 
@@ -127,7 +135,11 @@ async def sweep_check(req: SweepRequest):
         place_name = place.get("name", req.address)
 
         # Step 2: get events for next 30 days
-        today = date.today()
+        if req.tz_offset is not None:
+            user_tz = timezone(timedelta(minutes=-req.tz_offset))
+            today = datetime.now(user_tz).date()
+        else:
+            today = date.today()
         after = today.isoformat()
         before = (today + timedelta(days=30)).isoformat()
 
@@ -152,15 +164,20 @@ async def sweep_check(req: SweepRequest):
             for flag in flags:
                 name = flag.get("name", "")
                 if "Sweeping" in name or "sweeping" in name:
+                    # Parse time from flag name like Sweeping_8AM_12PM_EVEN or Sweeping_12AM_8AM_ODD
+                    time_str = name
+                    time_match = re.search(r'(\d{1,2})(AM|PM)_(\d{1,2})(AM|PM)', name)
+                    if time_match:
+                        time_str = f"{time_match.group(1)}:00 {time_match.group(2)} - {time_match.group(3)}:00 {time_match.group(4)}"
+
                     sweep_events.append({
                         "date": day,
                         "type": name,
                         "side": "even" if "EVEN" in name else "odd" if "ODD" in name else "both",
-                        "time": "8:00 AM - 12:00 PM" if "8AM_12PM" in name else name,
+                        "time": time_str,
                     })
 
         # Determine house number parity for side matching
-        import re
         house_match = re.match(r'(\d+)', req.address.strip())
         house_num = int(house_match.group(1)) if house_match else None
         car_side = "even" if house_num and house_num % 2 == 0 else "odd" if house_num else None
@@ -243,7 +260,6 @@ class OAuthCallbackRequest(BaseModel):
 @app.post("/api/oauth/start")
 async def oauth_start(req: OAuthStartRequest):
     """Generate the Tesla OAuth authorization URL for the user to visit."""
-    import secrets
     state = secrets.token_urlsafe(32)
     url = (
         f"https://auth.tesla.com/oauth2/v3/authorize"
@@ -286,4 +302,4 @@ async def oauth_callback(req: OAuthCallbackRequest):
         }
 
 
-app.mount("/", StaticFiles(directory=".", html=True), name="static")
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
