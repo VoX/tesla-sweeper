@@ -132,7 +132,12 @@ export default function App() {
   const [vehicleInfo, setVehicleInfo] = useState(null);
   const [mapPos, setMapPos] = useState(null);
   const [oauthStatus, setOauthStatus] = useState('');
-  const [tokens, setTokens] = useState(null);
+  const [tokens, setTokens] = useState(() => {
+    try {
+      const saved = localStorage.getItem('tesla_tokens');
+      return saved ? JSON.parse(saved) : null;
+    } catch { return null; }
+  });
 
   const [address, setAddress] = useState(() => new URLSearchParams(window.location.search).get('address') || '');
   const autoLookupDone = useRef(false);
@@ -142,6 +147,22 @@ export default function App() {
   const [redirectUri, setRedirectUri] = useState(() => window.location.href.split('?')[0].split('#')[0]);
 
   const refreshPromise = useRef(null);
+
+  useEffect(() => {
+    if (tokens) {
+      localStorage.setItem('tesla_tokens', JSON.stringify(tokens));
+      setToken(tokens.access_token);
+    } else {
+      localStorage.removeItem('tesla_tokens');
+    }
+  }, [tokens]);
+
+  const logout = () => {
+    setTokens(null);
+    setToken('');
+    setOauthStatus('');
+    reset();
+  };
 
   const reset = () => {
     setError('');
@@ -354,14 +375,24 @@ export default function App() {
 
       {tab === 'oauth' && (
         <div role="tabpanel">
-          <label htmlFor="oauth-client-id">Tesla App Client ID</label>
-          <input id="oauth-client-id" placeholder="From developer.tesla.com" value={clientId} onChange={e => setClientId(e.target.value)} />
-          <label htmlFor="oauth-client-secret">Client Secret</label>
-          <input id="oauth-client-secret" type="password" placeholder="Your app's client secret" value={clientSecret} onChange={e => setClientSecret(e.target.value)} />
-          <label htmlFor="oauth-redirect">Redirect URI</label>
-          <input id="oauth-redirect" placeholder="e.g. https://claw.bitvox.me/sweeper/" value={redirectUri} onChange={e => setRedirectUri(e.target.value)} />
-          <button onClick={handleOAuthStart} disabled={loading}>{loading ? 'Connecting...' : 'Connect Tesla Account'}</button>
-          {oauthStatus && <div className="oauth-status">{oauthStatus}</div>}
+          {tokens ? (
+            <>
+              <div className="oauth-status">{oauthStatus || '\u2705 Connected'}</div>
+              <button onClick={() => { reset(); handleCheckTesla(); }} disabled={loading}>{loading ? 'Checking...' : 'Check My Car'}</button>
+              <button className="disconnect-btn" onClick={logout}>Disconnect</button>
+            </>
+          ) : (
+            <>
+              <label htmlFor="oauth-client-id">Tesla App Client ID</label>
+              <input id="oauth-client-id" placeholder="From developer.tesla.com" value={clientId} onChange={e => setClientId(e.target.value)} />
+              <label htmlFor="oauth-client-secret">Client Secret</label>
+              <input id="oauth-client-secret" type="password" placeholder="Your app's client secret" value={clientSecret} onChange={e => setClientSecret(e.target.value)} />
+              <label htmlFor="oauth-redirect">Redirect URI</label>
+              <input id="oauth-redirect" placeholder="e.g. https://claw.bitvox.me/sweeper/" value={redirectUri} onChange={e => setRedirectUri(e.target.value)} />
+              <button onClick={handleOAuthStart} disabled={loading}>{loading ? 'Connecting...' : 'Connect Tesla Account'}</button>
+            </>
+          )}
+          {!tokens && oauthStatus && <div className="oauth-status">{oauthStatus}</div>}
         </div>
       )}
 

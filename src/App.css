@@ -42,5 +42,7 @@ button:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
 .error-dismiss { width: auto; padding: 4px 10px; background: transparent; color: #f85149; border: 1px solid #f85149; border-radius: 4px; font-size: 1rem; margin: 0; min-width: auto; }
 .error-dismiss:hover { background: #2d0a0a; }
 .oauth-status { font-size: 0.85rem; color: #8b949e; margin-bottom: 12px; }
+.disconnect-btn { background: transparent; color: #f85149; border: 1px solid #f85149; margin-top: -8px; }
+.disconnect-btn:hover { background: #2d0a0a; }
 footer { text-align: center; color: #8b949e; font-size: 0.75rem; margin-top: 24px; padding-bottom: 20px; }
 footer a { color: #58a6ff; text-decoration: none; }
