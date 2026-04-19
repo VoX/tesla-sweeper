@@ -107,6 +107,9 @@ export default function App() {
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
   const [redirectUri, setRedirectUri] = useState(() => window.location.href.split('?')[0].split('#')[0]);
+  const [refreshTokenInput, setRefreshTokenInput] = useState('');
+  const [rtClientId, setRtClientId] = useState('');
+  const [rtClientSecret, setRtClientSecret] = useState('');
 
   const reset = () => {
     setError('');
@@ -219,6 +222,20 @@ export default function App() {
     } catch (e) { setError('Failed to start OAuth: ' + e.message); }
   };
 
+  const handleRefreshLogin = async () => {
+    if (!refreshTokenInput || !rtClientId || !rtClientSecret) { setError('All three fields are required'); return; }
+    reset();
+    setLoading(true);
+    try {
+      const data = await post('oauth/refresh', { client_id: rtClientId, client_secret: rtClientSecret, refresh_token: refreshTokenInput });
+      setTokens({ access_token: data.access_token, refresh_token: data.refresh_token || refreshTokenInput, client_id: rtClientId, client_secret: rtClientSecret, expires_at: Date.now() + data.expires_in * 1000 });
+      setToken(data.access_token);
+      setOauthStatus('\u2705 Connected via refresh token! Checking your car...');
+      await checkVehicle(data.access_token);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const code = params.get('code');
@@ -261,8 +278,9 @@ export default function App() {
 
       <div className="tabs">
         <div className={`tab ${tab === 'address' ? 'active' : ''}`} onClick={() => setTab('address')}>{'\uD83D\uDCCD'} Address</div>
-        <div className={`tab ${tab === 'oauth' ? 'active' : ''}`} onClick={() => setTab('oauth')}>{'\uD83D\uDD10'} Tesla OAuth</div>
-        <div className={`tab ${tab === 'tesla' ? 'active' : ''}`} onClick={() => setTab('tesla')}>{'\uD83D\uDD11'} Bearer Token</div>
+        <div className={`tab ${tab === 'refresh' ? 'active' : ''}`} onClick={() => setTab('refresh')}>{'\uD83D\uDD04'} Refresh Token</div>
+        <div className={`tab ${tab === 'oauth' ? 'active' : ''}`} onClick={() => setTab('oauth')}>{'\uD83D\uDD10'} OAuth</div>
+        <div className={`tab ${tab === 'tesla' ? 'active' : ''}`} onClick={() => setTab('tesla')}>{'\uD83D\uDD11'} Bearer</div>
       </div>
 
       {tab === 'address' && (
@@ -270,6 +288,19 @@ export default function App() {
           <label htmlFor="address">Street Address in Somerville</label>
           <input id="address" placeholder="e.g. 11 Harvard St" value={address} onChange={e => setAddress(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleCheckAddress()} />
           <button onClick={handleCheckAddress} disabled={loading}>{loading ? 'Checking...' : 'Check Sweeping Schedule'}</button>
+        </div>
+      )}
+
+      {tab === 'refresh' && (
+        <div>
+          <label htmlFor="rt-client-id">Tesla App Client ID</label>
+          <input id="rt-client-id" placeholder="From developer.tesla.com" value={rtClientId} onChange={e => setRtClientId(e.target.value)} />
+          <label htmlFor="rt-client-secret">Client Secret</label>
+          <input id="rt-client-secret" type="password" placeholder="Your app's client secret" value={rtClientSecret} onChange={e => setRtClientSecret(e.target.value)} />
+          <label htmlFor="rt-refresh-token">Refresh Token</label>
+          <input id="rt-refresh-token" type="password" placeholder="Paste your Tesla refresh token" value={refreshTokenInput} onChange={e => setRefreshTokenInput(e.target.value)} />
+          <button onClick={handleRefreshLogin} disabled={loading}>{loading ? 'Connecting...' : 'Connect with Refresh Token'}</button>
+          {oauthStatus && <div className="oauth-status">{oauthStatus}</div>}
         </div>
       )}
 
