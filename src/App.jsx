@@ -99,6 +99,7 @@ function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
         <h3>Details</h3>
         <Row label="Address" value={data.place_name || fullAddr || ''} />
         {data.car_side && <Row label="Your Side" value={`${data.car_side} (#${data.house_num})`} />}
+        {data.days_until_next != null && <Row label="Next Sweep" value={data.days_until_next === 0 ? 'Today' : data.days_until_next === 1 ? 'Tomorrow' : `In ${data.days_until_next} days`} />}
         {vehicleName && <Row label="Vehicle" value={vehicleName} />}
         {lat != null && <Row label="Coordinates" value={`${lat.toFixed(5)}, ${lng.toFixed(5)}`} />}
         {sides && <Row label="Sweeping Rules" value={`${sides} \u00B7 ${times[0]}`} />}

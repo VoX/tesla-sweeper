@@ -164,12 +164,17 @@ app.post('/api/sweep-check', async (req, res) => {
       }
     } else if (sweepEvents.length) {
       const e = sweepEvents[0];
+      const daysUntil = Math.ceil((new Date(e.date) - new Date(todayStr)) / 86400000);
       status = 'safe'; title = "You're Good";
-      message = `Next sweep: ${e.date} (${e.side} side, ${e.time})`;
+      message = `Next sweep in ${daysUntil} day${daysUntil !== 1 ? 's' : ''}: ${e.date} (${e.side} side, ${e.time})`;
     } else {
       status = 'safe'; title = 'No Sweeping Scheduled';
       message = 'No sweeping events found in the next 30 days.';
     }
+
+    const daysUntilNext = sweepEvents.length
+      ? Math.ceil((new Date(sweepEvents[0].date) - new Date(todayStr)) / 86400000)
+      : null;
 
     res.json({
       found: true,
@@ -179,6 +184,7 @@ app.post('/api/sweep-check', async (req, res) => {
       sweep_events: sweepEvents,
       car_side: carSide,
       house_num: houseNum,
+      days_until_next: daysUntilNext,
     });
   } catch (e) {
     res.status(502).json({ detail: e.message });
