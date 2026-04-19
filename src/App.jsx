@@ -220,6 +220,9 @@ export default function App() {
       const data = await post('sweep-check', { address: address.trim(), today_date: clientToday() });
       if (!data.found) { setError(data.message); return; }
       setSweepData(data);
+      if (data.latitude && data.longitude) {
+        setMapPos({ lat: data.latitude, lng: data.longitude, street: data.place_name });
+      }
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   };

@@ -185,6 +185,20 @@ app.post('/api/sweep-check', wrap(async (req, res) => {
     message = 'No sweeping events found in the next 30 days.';
   }
 
+  // Forward geocode the matched address for map display
+  let latitude = null, longitude = null;
+  try {
+    const geoParams = new URLSearchParams({ q: (place.name || address) + ', Somerville, MA', format: 'jsonv2', limit: 1 });
+    const geoRes = await nominatimFetch(`${NOMINATIM_BASE}/search?${geoParams}`, { headers: { 'User-Agent': UA } });
+    if (geoRes.ok) {
+      const results = await geoRes.json();
+      if (results.length) {
+        latitude = parseFloat(results[0].lat);
+        longitude = parseFloat(results[0].lon);
+      }
+    }
+  } catch {}
+
   res.json({
     found: true,
     place_name: place.name || address,
@@ -194,6 +208,8 @@ app.post('/api/sweep-check', wrap(async (req, res) => {
     car_side: carSide,
     house_num: houseNum,
     days_until_next: daysUntilNext,
+    latitude,
+    longitude,
   });
 }));
 
