@@ -178,7 +178,6 @@ export default function App() {
       try {
         const data = await post('oauth/refresh', {
           client_id: tokens.client_id,
-          client_secret: tokens.client_secret,
           refresh_token: tokens.refresh_token,
         });
         const newTokens = {
