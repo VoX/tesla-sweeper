@@ -3,6 +3,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from typing import Optional
 from pydantic import BaseModel
 from datetime import date, datetime, timedelta, timezone
 import httpx
@@ -29,7 +30,7 @@ class GeocodeRequest(BaseModel):
 
 class SweepRequest(BaseModel):
     address: str
-    tz_offset: int | None = None  # minutes offset from UTC (from JS getTimezoneOffset())
+    tz_offset: Optional[int] = None  # minutes offset from UTC (from JS getTimezoneOffset())
 
 
 @app.post("/api/check")
