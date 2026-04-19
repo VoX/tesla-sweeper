@@ -133,7 +133,7 @@ async function startOAuth() {
   sessionStorage.setItem('tesla_redirect_uri', redirectUri);
 
   try {
-    const res = await fetch('/api/oauth/start', {
+    const res = await fetch('api/oauth/start', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({client_id: clientId, redirect_uri: redirectUri})
@@ -181,7 +181,7 @@ async function handleOAuthCallback() {
   switchTab('oauth');
 
   try {
-    const res = await fetch('/api/oauth/callback', {
+    const res = await fetch('api/oauth/callback', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri, code})
@@ -208,7 +208,7 @@ async function handleOAuthCallback() {
 async function checkTeslaWithToken(token) {
   hideResults();
   try {
-    const res = await fetch('/api/check', {
+    const res = await fetch('api/check', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({token})
@@ -216,7 +216,7 @@ async function checkTeslaWithToken(token) {
     if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
     const vehicle = await res.json();
 
-    const geoRes = await fetch('/api/reverse-geocode', {
+    const geoRes = await fetch('api/reverse-geocode', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({lat: vehicle.latitude, lng: vehicle.longitude})
@@ -227,7 +227,7 @@ async function checkTeslaWithToken(token) {
     const addr = `${geo.house_number} ${geo.street}`.trim();
     if (!addr || addr === ' ') { showStatus('info', 'Location Found', 'Car at ' + vehicle.latitude.toFixed(5) + ', ' + vehicle.longitude.toFixed(5) + " but couldn't determine street."); return; }
 
-    const sweepRes = await fetch('/api/sweep-check', {
+    const sweepRes = await fetch('api/sweep-check', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({address: addr, tz_offset: new Date().getTimezoneOffset()})
@@ -252,7 +252,7 @@ async function checkAddress(btn) {
   hideResults();
 
   try {
-    const res = await fetch('/api/sweep-check', {
+    const res = await fetch('api/sweep-check', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({address, tz_offset: new Date().getTimezoneOffset()})
@@ -280,7 +280,7 @@ async function checkTesla(btn) {
 
   try {
     // Get vehicle location
-    const res = await fetch('/api/check', {
+    const res = await fetch('api/check', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({token})
@@ -289,7 +289,7 @@ async function checkTesla(btn) {
     const vehicle = await res.json();
 
     // Reverse geocode
-    const geoRes = await fetch('/api/reverse-geocode', {
+    const geoRes = await fetch('api/reverse-geocode', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({lat: vehicle.latitude, lng: vehicle.longitude})
@@ -303,7 +303,7 @@ async function checkTesla(btn) {
     const addr = `${geo.house_number} ${geo.street}`.trim();
     if (!addr || addr === ' ') { showError('Could not determine street address from GPS'); return; }
 
-    const sweepRes = await fetch('/api/sweep-check', {
+    const sweepRes = await fetch('api/sweep-check', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({address: addr, tz_offset: new Date().getTimezoneOffset()})
