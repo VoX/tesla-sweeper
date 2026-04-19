@@ -15,18 +15,25 @@ Three ways to check:
 
 ## Stack
 
-- **Backend:** Python / FastAPI, proxies Tesla Fleet API + Recollect API + Nominatim geocoding
-- **Frontend:** Single HTML file, vanilla JS, Leaflet for maps
+- **Backend:** Node.js / Express, proxies Tesla Fleet API + Recollect API + Nominatim geocoding
+- **Frontend:** React 18 + Vite, Leaflet for maps
 - **Hosting:** Caddy reverse proxy on an EC2 instance
 
 ## Running locally
 
 ```bash
-pip install fastapi uvicorn httpx
-uvicorn server:app --reload --port 8000
+npm install
+npm run dev
 ```
 
-Then open `http://localhost:8000`.
+This starts both the Express backend (port 20040) and Vite dev server (port 5173) with API proxying. Open `http://localhost:5173/sweeper/`.
+
+For production:
+
+```bash
+npm run build
+npm start
+```
 
 ## How sweeping detection works
 

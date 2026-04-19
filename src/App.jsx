@@ -28,12 +28,7 @@ function StatusBox({ status, title, message }) {
 }
 
 function Row({ label, value }) {
-  return (
-    <div className="row">
-      <span className="label">{label}</span>
-      <span>{value}</span>
-    </div>
-  );
+  return <div className="row"><span className="label">{label}</span><span>{value}</span></div>;
 }
 
 function MapView({ lat, lng, street }) {
@@ -53,13 +48,7 @@ function MapView({ lat, lng, street }) {
       mapInstance.current.setView([lat, lng], 17);
       markerRef.current.setLatLng([lat, lng]);
     }
-    const popup = document.createElement('div');
-    const b = document.createElement('b');
-    b.textContent = 'Your Car';
-    popup.appendChild(b);
-    popup.appendChild(document.createElement('br'));
-    popup.appendChild(document.createTextNode(street || 'Unknown'));
-    markerRef.current.bindPopup(popup).openPopup();
+    markerRef.current.bindPopup(`<b>Your Car</b><br>${street || 'Unknown'}`).openPopup();
   }, [lat, lng, street]);
 
   if (lat == null) return null;
@@ -72,9 +61,6 @@ function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
   const sides = data.sweep_events?.length
     ? [...new Set(data.sweep_events.map(e => e.side))].map(s => s + ' side').join(' & ')
     : null;
-  const times = data.sweep_events?.length
-    ? [...new Set(data.sweep_events.map(e => e.time))]
-    : [];
 
   return (
     <>
@@ -82,17 +68,14 @@ function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
       {data.sweep_events?.length > 0 && (
         <div className="card">
           <h3>Upcoming Sweeping Events</h3>
-          {data.sweep_events.slice(0, 8).map((evt, i) => {
-            const d = new Date(evt.date + 'T12:00:00');
-            return (
-              <div className="event" key={i}>
-                <span className="event-date">
-                  {d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
-                </span>
-                <span className="event-side">{evt.side} side &middot; {evt.time}</span>
-              </div>
-            );
-          })}
+          {data.sweep_events.slice(0, 8).map((evt, i) => (
+            <div className="event" key={i}>
+              <span className="event-date">
+                {new Date(evt.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+              </span>
+              <span className="event-side">{evt.side} side &middot; {evt.time}</span>
+            </div>
+          ))}
         </div>
       )}
       <div className="card">
@@ -102,7 +85,7 @@ function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
         {data.days_until_next != null && <Row label="Next Sweep" value={data.days_until_next === 0 ? 'Today' : data.days_until_next === 1 ? 'Tomorrow' : `In ${data.days_until_next} days`} />}
         {vehicleName && <Row label="Vehicle" value={vehicleName} />}
         {lat != null && <Row label="Coordinates" value={`${lat.toFixed(5)}, ${lng.toFixed(5)}`} />}
-        {sides && <Row label="Sweeping Rules" value={`${sides} \u00B7 ${times[0]}`} />}
+        {sides && <Row label="Sweeping Rules" value={`${sides} \u00B7 ${data.sweep_events[0]?.time}`} />}
         <Row label="Data Source" value="City of Somerville / Recollect" />
       </div>
     </>
@@ -114,8 +97,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [sweepData, setSweepData] = useState(null);
-  const [vehicleName, setVehicleName] = useState('');
-  const [fullAddr, setFullAddr] = useState('');
+  const [vehicleInfo, setVehicleInfo] = useState(null);
   const [mapPos, setMapPos] = useState(null);
   const [oauthStatus, setOauthStatus] = useState('');
   const [tokens, setTokens] = useState(null);
@@ -124,17 +106,12 @@ export default function App() {
   const [token, setToken] = useState('');
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
-  const [redirectUri, setRedirectUri] = useState('');
-
-  useEffect(() => {
-    setRedirectUri(window.location.href.split('?')[0].split('#')[0]);
-  }, []);
+  const [redirectUri, setRedirectUri] = useState(() => window.location.href.split('?')[0].split('#')[0]);
 
   const reset = () => {
     setError('');
     setSweepData(null);
-    setVehicleName('');
-    setFullAddr('');
+    setVehicleInfo(null);
     setMapPos(null);
   };
 
@@ -188,16 +165,14 @@ export default function App() {
     } catch (e) {
       if (e.message.includes('401') && tokens?.refresh_token) {
         const newToken = await refreshToken();
-        if (newToken) {
-          vehicle = await post('check', { token: newToken });
-        } else throw e;
+        if (newToken) vehicle = await post('check', { token: newToken });
+        else throw e;
       } else throw e;
     }
 
     const geo = await post('reverse-geocode', { lat: vehicle.latitude, lng: vehicle.longitude });
     setMapPos({ lat: vehicle.latitude, lng: vehicle.longitude, street: geo.street || 'Unknown' });
-    setVehicleName(vehicle.vehicle_name);
-    setFullAddr(geo.display_name);
+    setVehicleInfo({ name: vehicle.vehicle_name, addr: geo.display_name });
 
     const addr = [geo.house_number, geo.street].filter(Boolean).join(' ');
     if (!addr) {
@@ -206,11 +181,8 @@ export default function App() {
     }
 
     const data = await post('sweep-check', { address: addr, tz_offset: new Date().getTimezoneOffset() });
-    if (data.found) {
-      setSweepData(data);
-    } else {
-      setError(`"${addr}" not in Somerville sweeping database.`);
-    }
+    if (data.found) setSweepData(data);
+    else setError(`"${addr}" not in Somerville sweeping database.`);
   };
 
   const handleCheckAddress = async () => {
@@ -272,26 +244,15 @@ export default function App() {
 
     post('oauth/callback', { client_id: cId, client_secret: cSecret, redirect_uri: rUri, code })
       .then(async (data) => {
-        setTokens({
-          access_token: data.access_token,
-          refresh_token: data.refresh_token,
-          client_id: cId,
-          client_secret: cSecret,
-          expires_at: Date.now() + data.expires_in * 1000,
-        });
+        setTokens({ access_token: data.access_token, refresh_token: data.refresh_token, client_id: cId, client_secret: cSecret, expires_at: Date.now() + data.expires_in * 1000 });
         setToken(data.access_token);
         setOauthStatus('\u2705 Connected! Checking your car...');
-        sessionStorage.removeItem('tesla_client_id');
-        sessionStorage.removeItem('tesla_client_secret');
-        sessionStorage.removeItem('tesla_redirect_uri');
-        sessionStorage.removeItem('tesla_oauth_state');
+        ['tesla_client_id', 'tesla_client_secret', 'tesla_redirect_uri', 'tesla_oauth_state'].forEach(k => sessionStorage.removeItem(k));
         await checkVehicle(data.access_token);
       })
       .catch(e => setOauthStatus('\u274C ' + e.message))
       .finally(() => setLoading(false));
   }, []);
-
-  const onKeyDown = (e, handler) => { if (e.key === 'Enter') handler(); };
 
   return (
     <div className="container">
@@ -307,7 +268,7 @@ export default function App() {
       {tab === 'address' && (
         <div>
           <label htmlFor="address">Street Address in Somerville</label>
-          <input id="address" placeholder="e.g. 11 Harvard St" value={address} onChange={e => setAddress(e.target.value)} onKeyDown={e => onKeyDown(e, handleCheckAddress)} />
+          <input id="address" placeholder="e.g. 11 Harvard St" value={address} onChange={e => setAddress(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleCheckAddress()} />
           <button onClick={handleCheckAddress} disabled={loading}>{loading ? 'Checking...' : 'Check Sweeping Schedule'}</button>
         </div>
       )}
@@ -328,14 +289,14 @@ export default function App() {
       {tab === 'tesla' && (
         <div>
           <label htmlFor="token">Tesla API Bearer Token</label>
-          <input id="token" type="password" placeholder="Paste your Tesla bearer token..." value={token} onChange={e => setToken(e.target.value)} onKeyDown={e => onKeyDown(e, handleCheckTesla)} />
+          <input id="token" type="password" placeholder="Paste your Tesla bearer token..." value={token} onChange={e => setToken(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleCheckTesla()} />
           <button onClick={handleCheckTesla} disabled={loading}>{loading ? 'Checking...' : 'Check My Car'}</button>
         </div>
       )}
 
       {error && <p className="error">{error}</p>}
       <MapView lat={mapPos?.lat} lng={mapPos?.lng} street={mapPos?.street} />
-      <SweepResults data={sweepData} vehicleName={vehicleName} fullAddr={fullAddr} lat={mapPos?.lat} lng={mapPos?.lng} />
+      <SweepResults data={sweepData} vehicleName={vehicleInfo?.name} fullAddr={vehicleInfo?.addr} lat={mapPos?.lat} lng={mapPos?.lng} />
 
       <footer>
         Somerville sweeping: Apr 1 – Dec 31 &middot; Data from Recollect/City of Somerville &middot; Always check street signs
