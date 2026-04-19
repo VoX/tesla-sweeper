@@ -121,7 +121,8 @@ export default function App() {
   const [oauthStatus, setOauthStatus] = useState('');
   const [tokens, setTokens] = useState(null);
 
-  const [address, setAddress] = useState('');
+  const [address, setAddress] = useState(() => new URLSearchParams(window.location.search).get('address') || '');
+  const autoLookupDone = useRef(false);
   const [token, setToken] = useState('');
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
@@ -223,6 +224,9 @@ export default function App() {
       if (data.latitude && data.longitude) {
         setMapPos({ lat: data.latitude, lng: data.longitude, street: data.place_name });
       }
+      const url = new URL(window.location);
+      url.searchParams.set('address', address.trim());
+      window.history.replaceState({}, '', url);
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   };
@@ -291,6 +295,15 @@ export default function App() {
         ['tesla_client_id', 'tesla_client_secret', 'tesla_redirect_uri', 'tesla_oauth_state'].forEach(k => sessionStorage.removeItem(k));
       })
       .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (autoLookupDone.current || !address) return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('address')) {
+      autoLookupDone.current = true;
+      handleCheckAddress();
+    }
   }, []);
 
   const tabs = [
