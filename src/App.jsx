@@ -88,14 +88,18 @@ function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
       {data.sweep_events?.length > 0 && (
         <div className="card">
           <h3>Upcoming Sweeping Events</h3>
-          {data.sweep_events.slice(0, 8).map((evt, i) => (
-            <div className="event" key={i}>
-              <span className="event-date">
-                {new Date(evt.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
-              </span>
-              <span className="event-side">{evt.side} side &middot; {evt.time}</span>
-            </div>
-          ))}
+          {data.sweep_events.slice(0, 8).map((evt, i) => {
+            const yourSide = data.car_side && (evt.side === data.car_side || evt.side === 'both');
+            return (
+              <div className={`event ${yourSide ? 'event-yours' : 'event-other'}`} key={i}>
+                <span className="event-date">
+                  {new Date(evt.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                  {yourSide && <span className="event-badge">YOUR SIDE</span>}
+                </span>
+                <span className="event-side">{evt.side} side &middot; {evt.time}</span>
+              </div>
+            );
+          })}
         </div>
       )}
       <div className="card">
