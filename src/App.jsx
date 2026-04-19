@@ -48,11 +48,25 @@ function MapView({ lat, lng, street }) {
       mapInstance.current.setView([lat, lng], 17);
       markerRef.current.setLatLng([lat, lng]);
     }
-    markerRef.current.bindPopup(`<b>Your Car</b><br>${street || 'Unknown'}`).openPopup();
+    const popup = document.createElement('div');
+    const b = document.createElement('b');
+    b.textContent = 'Your Car';
+    popup.appendChild(b);
+    popup.appendChild(document.createElement('br'));
+    popup.appendChild(document.createTextNode(street || 'Unknown'));
+    markerRef.current.bindPopup(popup).openPopup();
+
+    return () => {
+      if (mapInstance.current) {
+        mapInstance.current.remove();
+        mapInstance.current = null;
+        markerRef.current = null;
+      }
+    };
   }, [lat, lng, street]);
 
   if (lat == null) return null;
-  return <div ref={mapRef} className="map-container" />;
+  return <div ref={mapRef} className="map-container" aria-label="Vehicle location map" role="img" />;
 }
 
 function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
@@ -92,6 +106,11 @@ function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
   );
 }
 
+function clientToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 export default function App() {
   const [tab, setTab] = useState('address');
   const [loading, setLoading] = useState(false);
@@ -108,6 +127,8 @@ export default function App() {
   const [clientSecret, setClientSecret] = useState('');
   const [redirectUri, setRedirectUri] = useState(() => window.location.href.split('?')[0].split('#')[0]);
 
+  const refreshPromise = useRef(null);
+
   const reset = () => {
     setError('');
     setSweepData(null);
@@ -117,27 +138,33 @@ export default function App() {
 
   const refreshToken = useCallback(async () => {
     if (!tokens?.refresh_token) return false;
-    try {
-      const data = await post('oauth/refresh', {
-        client_id: tokens.client_id,
-        client_secret: tokens.client_secret,
-        refresh_token: tokens.refresh_token,
-      });
-      const newTokens = {
-        ...tokens,
-        access_token: data.access_token,
-        refresh_token: data.refresh_token || tokens.refresh_token,
-        expires_at: Date.now() + data.expires_in * 1000,
-      };
-      setTokens(newTokens);
-      setToken(data.access_token);
-      setOauthStatus('\u2705 Token refreshed');
-      return data.access_token;
-    } catch (e) {
-      setOauthStatus('\u274C Refresh failed: ' + e.message);
-      setTokens(null);
-      return false;
-    }
+    if (refreshPromise.current) return refreshPromise.current;
+    refreshPromise.current = (async () => {
+      try {
+        const data = await post('oauth/refresh', {
+          client_id: tokens.client_id,
+          client_secret: tokens.client_secret,
+          refresh_token: tokens.refresh_token,
+        });
+        const newTokens = {
+          ...tokens,
+          access_token: data.access_token,
+          refresh_token: data.refresh_token || tokens.refresh_token,
+          expires_at: Date.now() + data.expires_in * 1000,
+        };
+        setTokens(newTokens);
+        setToken(data.access_token);
+        setOauthStatus('\u2705 Token refreshed');
+        return data.access_token;
+      } catch (e) {
+        setOauthStatus('\u274C Refresh failed: ' + e.message);
+        setTokens(null);
+        return false;
+      } finally {
+        refreshPromise.current = null;
+      }
+    })();
+    return refreshPromise.current;
   }, [tokens]);
 
   useEffect(() => {
@@ -180,7 +207,7 @@ export default function App() {
       return;
     }
 
-    const data = await post('sweep-check', { address: addr, tz_offset: new Date().getTimezoneOffset() });
+    const data = await post('sweep-check', { address: addr, today_date: clientToday() });
     if (data.found) setSweepData(data);
     else setError(`"${addr}" not in Somerville sweeping database.`);
   };
@@ -190,7 +217,7 @@ export default function App() {
     reset();
     setLoading(true);
     try {
-      const data = await post('sweep-check', { address: address.trim(), tz_offset: new Date().getTimezoneOffset() });
+      const data = await post('sweep-check', { address: address.trim(), today_date: clientToday() });
       if (!data.found) { setError(data.message); return; }
       setSweepData(data);
     } catch (e) { setError(e.message); }
@@ -212,11 +239,17 @@ export default function App() {
     sessionStorage.setItem('tesla_client_id', clientId);
     sessionStorage.setItem('tesla_client_secret', clientSecret);
     sessionStorage.setItem('tesla_redirect_uri', uri);
+    setLoading(true);
+    setOauthStatus('Redirecting to Tesla...');
     try {
       const data = await post('oauth/start', { client_id: clientId, redirect_uri: uri });
       sessionStorage.setItem('tesla_oauth_state', data.state);
       window.location.href = data.url;
-    } catch (e) { setError('Failed to start OAuth: ' + e.message); }
+    } catch (e) {
+      setError('Failed to start OAuth: ' + e.message);
+      setLoading(false);
+      setOauthStatus('');
+    }
   };
 
   useEffect(() => {
@@ -250,23 +283,40 @@ export default function App() {
         ['tesla_client_id', 'tesla_client_secret', 'tesla_redirect_uri', 'tesla_oauth_state'].forEach(k => sessionStorage.removeItem(k));
         await checkVehicle(data.access_token);
       })
-      .catch(e => setOauthStatus('\u274C ' + e.message))
+      .catch(e => {
+        setOauthStatus('\u274C ' + e.message);
+        ['tesla_client_id', 'tesla_client_secret', 'tesla_redirect_uri', 'tesla_oauth_state'].forEach(k => sessionStorage.removeItem(k));
+      })
       .finally(() => setLoading(false));
   }, []);
+
+  const tabs = [
+    { id: 'address', icon: '\uD83D\uDCCD', label: 'Address' },
+    { id: 'oauth', icon: '\uD83D\uDD10', label: 'Tesla OAuth' },
+    { id: 'tesla', icon: '\uD83D\uDD11', label: 'Bearer Token' },
+  ];
 
   return (
     <div className="container">
       <h1>{'\uD83D\uDE97'} Tesla Sweeper</h1>
       <p className="subtitle">Check if your car needs to move for Somerville street sweeping</p>
 
-      <div className="tabs">
-        <div className={`tab ${tab === 'address' ? 'active' : ''}`} onClick={() => setTab('address')}>{'\uD83D\uDCCD'} Address</div>
-        <div className={`tab ${tab === 'oauth' ? 'active' : ''}`} onClick={() => setTab('oauth')}>{'\uD83D\uDD10'} Tesla OAuth</div>
-        <div className={`tab ${tab === 'tesla' ? 'active' : ''}`} onClick={() => setTab('tesla')}>{'\uD83D\uDD11'} Bearer Token</div>
+      <div className="tabs" role="tablist">
+        {tabs.map(t => (
+          <button
+            key={t.id}
+            role="tab"
+            aria-selected={tab === t.id}
+            className={`tab ${tab === t.id ? 'active' : ''}`}
+            onClick={() => setTab(t.id)}
+          >
+            {t.icon} {t.label}
+          </button>
+        ))}
       </div>
 
       {tab === 'address' && (
-        <div>
+        <div role="tabpanel">
           <label htmlFor="address">Street Address in Somerville</label>
           <input id="address" placeholder="e.g. 11 Harvard St" value={address} onChange={e => setAddress(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleCheckAddress()} />
           <button onClick={handleCheckAddress} disabled={loading}>{loading ? 'Checking...' : 'Check Sweeping Schedule'}</button>
@@ -274,27 +324,32 @@ export default function App() {
       )}
 
       {tab === 'oauth' && (
-        <div>
+        <div role="tabpanel">
           <label htmlFor="oauth-client-id">Tesla App Client ID</label>
           <input id="oauth-client-id" placeholder="From developer.tesla.com" value={clientId} onChange={e => setClientId(e.target.value)} />
           <label htmlFor="oauth-client-secret">Client Secret</label>
           <input id="oauth-client-secret" type="password" placeholder="Your app's client secret" value={clientSecret} onChange={e => setClientSecret(e.target.value)} />
           <label htmlFor="oauth-redirect">Redirect URI</label>
           <input id="oauth-redirect" placeholder="e.g. https://claw.bitvox.me/sweeper/" value={redirectUri} onChange={e => setRedirectUri(e.target.value)} />
-          <button onClick={handleOAuthStart} disabled={loading}>Connect Tesla Account</button>
+          <button onClick={handleOAuthStart} disabled={loading}>{loading ? 'Connecting...' : 'Connect Tesla Account'}</button>
           {oauthStatus && <div className="oauth-status">{oauthStatus}</div>}
         </div>
       )}
 
       {tab === 'tesla' && (
-        <div>
+        <div role="tabpanel">
           <label htmlFor="token">Tesla API Bearer Token</label>
           <input id="token" type="password" placeholder="Paste your Tesla bearer token..." value={token} onChange={e => setToken(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleCheckTesla()} />
           <button onClick={handleCheckTesla} disabled={loading}>{loading ? 'Checking...' : 'Check My Car'}</button>
         </div>
       )}
 
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <div className="error-box">
+          <p className="error">{error}</p>
+          <button className="error-dismiss" onClick={() => setError('')}>&times;</button>
+        </div>
+      )}
       <MapView lat={mapPos?.lat} lng={mapPos?.lng} street={mapPos?.street} />
       <SweepResults data={sweepData} vehicleName={vehicleInfo?.name} fullAddr={vehicleInfo?.addr} lat={mapPos?.lat} lng={mapPos?.lng} />
 

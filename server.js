@@ -12,16 +12,34 @@ const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
 const RECOLLECT_BASE = 'https://api.recollect.net/api';
 const RECOLLECT_SERVICE = 349;
 const UA = 'TeslaSweeper/1.0';
+const FETCH_TIMEOUT = 12000;
 
-const wrap = (fn) => (req, res) => fn(req, res).catch(e => res.status(502).json({ detail: e.message }));
+const wrap = (fn) => (req, res) => fn(req, res).catch(e => {
+  console.error(`${req.path}:`, e.message);
+  res.status(502).json({ detail: 'Upstream service error' });
+});
+
+function fetchWithTimeout(url, options = {}) {
+  return fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), ...options });
+}
+
+// Nominatim rate limiter (1 req/sec)
+let lastNominatimCall = 0;
+async function nominatimFetch(url, options) {
+  const now = Date.now();
+  const wait = Math.max(0, 1000 - (now - lastNominatimCall));
+  if (wait > 0) await new Promise(r => setTimeout(r, wait));
+  lastNominatimCall = Date.now();
+  return fetchWithTimeout(url, options);
+}
 
 async function teslaTokenExchange(body) {
-  const r = await fetch('https://auth.tesla.com/oauth2/v3/token', {
+  const r = await fetchWithTimeout('https://auth.tesla.com/oauth2/v3/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(await r.text());
+  if (!r.ok) throw new Error('Token exchange failed');
   return r.json();
 }
 
@@ -31,20 +49,20 @@ app.post('/api/check', wrap(async (req, res) => {
 
   const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 
-  const vehiclesRes = await fetch(`${TESLA_BASE}/api/1/vehicles`, { headers });
+  const vehiclesRes = await fetchWithTimeout(`${TESLA_BASE}/api/1/vehicles`, { headers });
   if (vehiclesRes.status === 401) return res.status(401).json({ detail: 'Invalid or expired Tesla token' });
-  if (!vehiclesRes.ok) return res.status(vehiclesRes.status).json({ detail: await vehiclesRes.text() });
+  if (!vehiclesRes.ok) return res.status(vehiclesRes.status).json({ detail: 'Tesla API error' });
 
   const vehicles = (await vehiclesRes.json()).response || [];
   if (!vehicles.length) return res.status(404).json({ detail: 'No vehicles found on this account' });
 
   const vehicle = vehicles[0];
-  const locRes = await fetch(
+  const locRes = await fetchWithTimeout(
     `${TESLA_BASE}/api/1/vehicles/${vehicle.id}/vehicle_data?endpoints=location_data`,
     { headers }
   );
   if (locRes.status === 408) return res.status(408).json({ detail: 'Vehicle is asleep. Open the Tesla app to wake it, then retry.' });
-  if (!locRes.ok) return res.status(locRes.status).json({ detail: await locRes.text() });
+  if (!locRes.ok) return res.status(locRes.status).json({ detail: 'Failed to get vehicle data' });
 
   const driveState = (await locRes.json()).response?.drive_state || {};
   const { latitude, longitude } = driveState;
@@ -56,7 +74,7 @@ app.post('/api/check', wrap(async (req, res) => {
 app.post('/api/reverse-geocode', wrap(async (req, res) => {
   const { lat, lng } = req.body;
   const params = new URLSearchParams({ format: 'jsonv2', lat, lon: lng, zoom: 18, addressdetails: 1 });
-  const geoRes = await fetch(`${NOMINATIM_BASE}/reverse?${params}`, { headers: { 'User-Agent': UA } });
+  const geoRes = await nominatimFetch(`${NOMINATIM_BASE}/reverse?${params}`, { headers: { 'User-Agent': UA } });
   if (!geoRes.ok) return res.status(502).json({ detail: 'Nominatim returned an error' });
 
   const data = await geoRes.json();
@@ -71,13 +89,11 @@ app.post('/api/reverse-geocode', wrap(async (req, res) => {
 }));
 
 app.post('/api/sweep-check', wrap(async (req, res) => {
-  const { address, tz_offset } = req.body;
+  const { address, today_date } = req.body;
   if (!address) return res.status(400).json({ detail: 'Address required' });
 
-  const today = tz_offset != null
-    ? new Date(new Date().getTime() + (-tz_offset - new Date().getTimezoneOffset()) * 60000)
-    : new Date();
-  const todayStr = today.toISOString().slice(0, 10);
+  const todayStr = today_date || new Date().toISOString().slice(0, 10);
+  const today = new Date(todayStr + 'T12:00:00Z');
   const future = new Date(today);
   future.setDate(future.getDate() + 30);
   const tomorrowDate = new Date(today);
@@ -85,7 +101,7 @@ app.post('/api/sweep-check', wrap(async (req, res) => {
   const tomorrowStr = tomorrowDate.toISOString().slice(0, 10);
 
   const suggestParams = new URLSearchParams({ q: address, locale: 'en-US' });
-  const suggestRes = await fetch(
+  const suggestRes = await fetchWithTimeout(
     `${RECOLLECT_BASE}/areas/Somerville/services/${RECOLLECT_SERVICE}/address-suggest?${suggestParams}`,
     { headers: { 'User-Agent': UA } }
   );
@@ -97,7 +113,7 @@ app.post('/api/sweep-check', wrap(async (req, res) => {
   const place = suggestions[0];
 
   const eventsParams = new URLSearchParams({ after: todayStr, before: future.toISOString().slice(0, 10), locale: 'en-US' });
-  const eventsRes = await fetch(
+  const eventsRes = await fetchWithTimeout(
     `${RECOLLECT_BASE}/places/${place.place_id}/services/${RECOLLECT_SERVICE}/events?${eventsParams}`,
     { headers: { 'User-Agent': UA } }
   );
@@ -108,12 +124,13 @@ app.post('/api/sweep-check', wrap(async (req, res) => {
 
   const sweepEvents = [];
   for (const event of rawEvents) {
-    for (const flag of (event.flags || [])) {
+    if (!event.flags || !event.day) continue;
+    for (const flag of event.flags) {
       const name = flag.name || '';
       if (!name.toLowerCase().includes('sweeping')) continue;
       const m = name.match(/(\d{1,2})(AM|PM)_(\d{1,2})(AM|PM)/);
       sweepEvents.push({
-        date: event.day || '',
+        date: event.day,
         type: name,
         side: name.includes('EVEN') ? 'even' : name.includes('ODD') ? 'odd' : 'both',
         time: m ? `${m[1]}:00 ${m[2]} - ${m[3]}:00 ${m[4]}` : name,
@@ -128,7 +145,7 @@ app.post('/api/sweep-check', wrap(async (req, res) => {
   const sweepingToday = sweepEvents.filter(e => e.date === todayStr);
   const sweepingTomorrow = sweepEvents.filter(e => e.date === tomorrowStr);
   const daysUntilNext = sweepEvents.length
-    ? Math.ceil((new Date(sweepEvents[0].date) - new Date(todayStr)) / 86400000)
+    ? Math.max(0, Math.ceil((new Date(sweepEvents[0].date) - new Date(todayStr)) / 86400000))
     : null;
 
   const sideLabel = (events) => [...new Set(events.map(e => e.side + ' side'))].join(', ');
@@ -138,7 +155,12 @@ app.post('/api/sweep-check', wrap(async (req, res) => {
 
   if (sweepingToday.length) {
     const sides = sideLabel(sweepingToday);
-    if (carMatches(sweepingToday)) {
+    const now = new Date();
+    const pastNoon = now.getHours() >= 12;
+    if (pastNoon) {
+      status = 'info'; title = 'Sweeping Done for Today';
+      message = `Sweeping was scheduled today (${sides}, 8AM-12PM). It's past noon — you're clear.`;
+    } else if (carMatches(sweepingToday)) {
       status = 'danger'; title = 'MOVE YOUR CAR';
       message = `Sweeping TODAY on YOUR side (${sides}, 8AM-12PM). $50 fine!`;
     } else {
@@ -194,8 +216,14 @@ app.post('/api/oauth/refresh', wrap(async (req, res) => {
   res.json({ access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in });
 }));
 
+// API 404 catch — must be before the SPA catch-all
+app.all('/api/*', (req, res) => res.status(404).json({ detail: 'API endpoint not found' }));
+
 app.use(express.static(join(__dirname, 'dist')));
 app.get('*', (req, res) => res.sendFile(join(__dirname, 'dist', 'index.html')));
+
+process.on('uncaughtException', (e) => console.error('Uncaught:', e));
+process.on('unhandledRejection', (e) => console.error('Unhandled rejection:', e));
 
 const PORT = process.env.PORT || 20040;
 app.listen(PORT, '127.0.0.1', () => console.log(`Tesla Sweeper on http://127.0.0.1:${PORT}`));
