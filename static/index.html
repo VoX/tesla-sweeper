@@ -94,12 +94,81 @@ footer a{color:#58a6ff;text-decoration:none}
 
 <script>
 let map = null, marker = null;
+let teslaTokens = null; // {access_token, refresh_token, expires_at, client_id, client_secret}
 
 async function post(url, body) {
   const res = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
   if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'API error'); }
   return res.json();
 }
+
+function storeTokens(data, clientId, clientSecret) {
+  teslaTokens = {
+    access_token: data.access_token,
+    refresh_token: data.refresh_token,
+    client_id: clientId,
+    client_secret: clientSecret,
+    expires_at: Date.now() + (data.expires_in * 1000),
+  };
+  updateTokenStatus();
+}
+
+function updateTokenStatus() {
+  const el = document.getElementById('oauth-status');
+  if (!teslaTokens) { el.style.display = 'none'; return; }
+  const remaining = Math.max(0, teslaTokens.expires_at - Date.now());
+  const mins = Math.floor(remaining / 60000);
+  const hrs = Math.floor(mins / 60);
+  el.style.display = 'block';
+  if (remaining <= 0) {
+    el.textContent = '\u26A0\uFE0F Token expired. Refreshing...';
+    refreshToken();
+  } else if (hrs > 0) {
+    el.textContent = `\u2705 Connected — token expires in ${hrs}h ${mins % 60}m`;
+  } else {
+    el.textContent = `\u2705 Connected — token expires in ${mins}m`;
+  }
+}
+
+async function refreshToken() {
+  if (!teslaTokens || !teslaTokens.refresh_token) return false;
+  const el = document.getElementById('oauth-status');
+  try {
+    const data = await post('api/oauth/refresh', {
+      client_id: teslaTokens.client_id,
+      client_secret: teslaTokens.client_secret,
+      refresh_token: teslaTokens.refresh_token,
+    });
+    teslaTokens.access_token = data.access_token;
+    if (data.refresh_token) teslaTokens.refresh_token = data.refresh_token;
+    teslaTokens.expires_at = Date.now() + (data.expires_in * 1000);
+    document.getElementById('token').value = data.access_token;
+    el.textContent = '\u2705 Token refreshed';
+    updateTokenStatus();
+    return true;
+  } catch (e) {
+    el.textContent = '\u274C Refresh failed: ' + e.message + '. Re-authenticate via OAuth.';
+    teslaTokens = null;
+    return false;
+  }
+}
+
+async function postWithRefresh(url, body) {
+  try {
+    return await post(url, body);
+  } catch (e) {
+    if (e.message.includes('401') && teslaTokens && teslaTokens.refresh_token) {
+      const refreshed = await refreshToken();
+      if (refreshed) {
+        body.token = teslaTokens.access_token;
+        return await post(url, body);
+      }
+    }
+    throw e;
+  }
+}
+
+setInterval(updateTokenStatus, 60000);
 
 function switchTab(tab) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -132,6 +201,8 @@ async function handleOAuthCallback() {
   const state = params.get('state');
   if (!code) return;
 
+  window.history.replaceState({}, '', window.location.pathname);
+
   const savedState = sessionStorage.getItem('tesla_oauth_state');
   if (!state || !savedState) { showError('OAuth state missing — possible CSRF. Try again.'); return; }
   if (state !== savedState) { showError('OAuth state mismatch — possible CSRF. Try again.'); return; }
@@ -140,8 +211,6 @@ async function handleOAuthCallback() {
   const clientSecret = sessionStorage.getItem('tesla_client_secret');
   const redirectUri = sessionStorage.getItem('tesla_redirect_uri');
   if (!clientId || !clientSecret) { showError('Missing OAuth credentials. Please start the flow again.'); return; }
-
-  window.history.replaceState({}, '', window.location.pathname);
   const statusEl = document.getElementById('oauth-status');
   statusEl.style.display = 'block';
   statusEl.textContent = 'Exchanging code for token...';
@@ -149,6 +218,7 @@ async function handleOAuthCallback() {
 
   try {
     const data = await post('api/oauth/callback', {client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri, code});
+    storeTokens(data, clientId, clientSecret);
     statusEl.textContent = '\u2705 Connected! Checking your car...';
     document.getElementById('token').value = data.access_token;
     await checkVehicleWithToken(data.access_token);
@@ -160,7 +230,7 @@ async function handleOAuthCallback() {
 }
 
 async function checkVehicleWithToken(token) {
-  const vehicle = await post('api/check', {token});
+  const vehicle = await postWithRefresh('api/check', {token});
   const geo = await post('api/reverse-geocode', {lat: vehicle.latitude, lng: vehicle.longitude});
   showMap(vehicle.latitude, vehicle.longitude, geo.street || 'Unknown');
 

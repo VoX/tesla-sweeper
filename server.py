@@ -246,4 +246,32 @@ async def oauth_callback(req: OAuthCallbackRequest):
     }
 
 
+class RefreshRequest(BaseModel):
+    client_id: str
+    client_secret: str
+    refresh_token: str
+
+
+@app.post("/api/oauth/refresh")
+async def oauth_refresh(req: RefreshRequest):
+    resp = await proxy_post(
+        "https://auth.tesla.com/oauth2/v3/token",
+        json={
+            "grant_type": "refresh_token",
+            "client_id": req.client_id,
+            "client_secret": req.client_secret,
+            "refresh_token": req.refresh_token,
+        },
+    )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+
+    data = resp.json()
+    return {
+        "access_token": data.get("access_token"),
+        "refresh_token": data.get("refresh_token"),
+        "expires_in": data.get("expires_in"),
+    }
+
+
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
