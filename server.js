@@ -33,11 +33,13 @@ async function nominatimFetch(url, options) {
   return fetchWithTimeout(url, options);
 }
 
-async function teslaTokenExchange(body) {
-  const r = await fetchWithTimeout('https://auth.tesla.com/oauth2/v3/token', {
+const TESLA_TOKEN_URL = 'https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token';
+
+async function teslaTokenExchange(params) {
+  const r = await fetchWithTimeout(TESLA_TOKEN_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(params).toString(),
   });
   if (!r.ok) throw new Error('Token exchange failed');
   return r.json();
@@ -222,13 +224,16 @@ app.post('/api/oauth/start', (req, res) => {
 
 app.post('/api/oauth/callback', wrap(async (req, res) => {
   const { client_id, client_secret, redirect_uri, code } = req.body;
-  const data = await teslaTokenExchange({ grant_type: 'authorization_code', client_id, client_secret, code, redirect_uri });
+  const data = await teslaTokenExchange({
+    grant_type: 'authorization_code', client_id, client_secret, code, redirect_uri,
+    audience: TESLA_BASE,
+  });
   res.json({ access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in, token_type: data.token_type });
 }));
 
 app.post('/api/oauth/refresh', wrap(async (req, res) => {
-  const { client_id, client_secret, refresh_token } = req.body;
-  const data = await teslaTokenExchange({ grant_type: 'refresh_token', client_id, client_secret, refresh_token });
+  const { client_id, refresh_token } = req.body;
+  const data = await teslaTokenExchange({ grant_type: 'refresh_token', client_id, refresh_token });
   res.json({ access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in });
 }));
 
