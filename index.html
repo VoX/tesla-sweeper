@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tesla Sweeper — Somerville Street Sweeping Check</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,system-ui,sans-serif;background:#0d1117;color:#c9d1d9;min-height:100vh}
+.container{max-width:600px;margin:0 auto;padding:20px}
+h1{font-size:1.5rem;margin-bottom:4px;color:#58a6ff}
+.subtitle{color:#8b949e;font-size:0.85rem;margin-bottom:20px}
+.tabs{display:flex;gap:8px;margin-bottom:16px}
+.tab{flex:1;padding:10px;background:#161b22;border:1px solid #30363d;border-radius:6px;color:#8b949e;font-size:0.85rem;cursor:pointer;text-align:center}
+.tab.active{background:#1f2937;border-color:#58a6ff;color:#58a6ff}
+.tab-content{display:none}
+.tab-content.active{display:block}
+.input-group{margin-bottom:16px}
+label{display:block;font-size:0.85rem;color:#8b949e;margin-bottom:6px}
+input[type=text],input[type=password]{width:100%;padding:10px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:0.9rem}
+input:focus{outline:none;border-color:#58a6ff}
+button{width:100%;padding:12px;background:#238636;color:#fff;border:none;border-radius:6px;font-size:1rem;font-weight:600;cursor:pointer;margin-bottom:16px}
+button:hover{background:#2ea043}
+button:disabled{background:#21262d;color:#484f58;cursor:not-allowed}
+#status{padding:16px;border-radius:8px;margin-bottom:16px;display:none}
+.safe{background:#0d1f0d;border:1px solid #238636;color:#3fb950}
+.warning{background:#2a1f00;border:1px solid #d29922;color:#e3b341}
+.danger{background:#2d0a0a;border:1px solid #f85149;color:#f85149}
+.info{background:#0d1f2d;border:1px solid #58a6ff;color:#58a6ff}
+#status h2{font-size:1.1rem;margin-bottom:8px}
+#status p{font-size:0.9rem;line-height:1.5}
+#map{height:250px;border-radius:8px;margin-bottom:16px;display:none;border:1px solid #30363d}
+.details{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;display:none;margin-bottom:16px}
+.details h3{font-size:0.9rem;color:#58a6ff;margin-bottom:8px}
+.details .row{display:flex;justify-content:space-between;padding:4px 0;font-size:0.85rem;border-bottom:1px solid #21262d}
+.details .row:last-child{border:none}
+.details .label{color:#8b949e}
+.upcoming{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;display:none;margin-bottom:16px}
+.upcoming h3{font-size:0.9rem;color:#58a6ff;margin-bottom:8px}
+.upcoming .event{padding:6px 0;font-size:0.85rem;border-bottom:1px solid #21262d;display:flex;justify-content:space-between}
+.upcoming .event:last-child{border:none}
+.upcoming .event-date{color:#c9d1d9}
+.upcoming .event-side{color:#8b949e}
+.error{color:#f85149;font-size:0.85rem;margin-bottom:12px;display:none}
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid #484f58;border-top-color:#58a6ff;border-radius:50%;animation:spin .6s linear infinite;margin-right:8px;vertical-align:middle}
+@keyframes spin{to{transform:rotate(360deg)}}
+.or-divider{text-align:center;color:#484f58;font-size:0.8rem;margin:12px 0;position:relative}
+.or-divider::before,.or-divider::after{content:'';position:absolute;top:50%;width:40%;height:1px;background:#30363d}
+.or-divider::before{left:0}
+.or-divider::after{right:0}
+footer{text-align:center;color:#484f58;font-size:0.75rem;margin-top:24px;padding-bottom:20px}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🚗 Tesla Sweeper</h1>
+  <p class="subtitle">Check if your car needs to move for Somerville street sweeping</p>
+
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('address')">📍 Address</div>
+    <div class="tab" onclick="switchTab('oauth')">🔐 Tesla OAuth</div>
+    <div class="tab" onclick="switchTab('tesla')">🔑 Bearer Token</div>
+  </div>
+
+  <div id="tab-address" class="tab-content active">
+    <div class="input-group">
+      <label for="address">Street Address in Somerville</label>
+      <input type="text" id="address" placeholder="e.g. 11 Harvard St">
+    </div>
+    <button onclick="checkAddress()">Check Sweeping Schedule</button>
+  </div>
+
+  <div id="tab-oauth" class="tab-content">
+    <div class="input-group">
+      <label for="oauth-client-id">Tesla App Client ID</label>
+      <input type="text" id="oauth-client-id" placeholder="From developer.tesla.com">
+    </div>
+    <div class="input-group">
+      <label for="oauth-client-secret">Client Secret</label>
+      <input type="password" id="oauth-client-secret" placeholder="Your app's client secret">
+    </div>
+    <div class="input-group">
+      <label for="oauth-redirect">Redirect URI</label>
+      <input type="text" id="oauth-redirect" placeholder="e.g. https://claw.bitvox.me/sweeper/" value="">
+    </div>
+    <button id="oauth-btn" onclick="startOAuth()">Connect Tesla Account</button>
+    <div id="oauth-status" style="display:none;font-size:0.85rem;color:#8b949e;margin-bottom:12px"></div>
+  </div>
+
+  <div id="tab-tesla" class="tab-content">
+    <div class="input-group">
+      <label for="token">Tesla API Bearer Token</label>
+      <input type="password" id="token" placeholder="Paste your Tesla bearer token...">
+    </div>
+    <button onclick="checkTesla()">Check My Car</button>
+  </div>
+
+  <p class="error" id="error"></p>
+  <div id="status"></div>
+  <div id="map"></div>
+  <div class="upcoming" id="upcoming"></div>
+  <div class="details" id="details"></div>
+</div>
+
+<footer>
+  Somerville sweeping: Apr 1 – Dec 31 · Data from Recollect/City of Somerville · Always check street signs
+</footer>
+
+<script>
+let map = null, marker = null;
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelector(`#tab-${tab}`).classList.add('active');
+  const idx = {address:0, oauth:1, tesla:2}[tab] || 0;
+  document.querySelectorAll('.tab')[idx].classList.add('active');
+  document.getElementById('error').style.display = 'none';
+}
+
+async function startOAuth() {
+  const clientId = document.getElementById('oauth-client-id').value.trim();
+  const clientSecret = document.getElementById('oauth-client-secret').value.trim();
+  const redirectUri = document.getElementById('oauth-redirect').value.trim() || window.location.href.split('?')[0];
+
+  if (!clientId || !clientSecret) { showError('Client ID and Secret are required'); return; }
+
+  // Store in sessionStorage for the callback
+  sessionStorage.setItem('tesla_client_id', clientId);
+  sessionStorage.setItem('tesla_client_secret', clientSecret);
+  sessionStorage.setItem('tesla_redirect_uri', redirectUri);
+
+  try {
+    const res = await fetch('/api/oauth/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({client_id: clientId, redirect_uri: redirectUri})
+    });
+    const data = await res.json();
+    sessionStorage.setItem('tesla_oauth_state', data.state);
+    // Redirect to Tesla
+    window.location.href = data.url;
+  } catch (e) {
+    showError('Failed to start OAuth: ' + e.message);
+  }
+}
+
+async function handleOAuthCallback() {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get('code');
+  const state = params.get('state');
+  if (!code) return;
+
+  const savedState = sessionStorage.getItem('tesla_oauth_state');
+  if (state && savedState && state !== savedState) {
+    showError('OAuth state mismatch — possible CSRF. Try again.');
+    return;
+  }
+
+  const clientId = sessionStorage.getItem('tesla_client_id');
+  const clientSecret = sessionStorage.getItem('tesla_client_secret');
+  const redirectUri = sessionStorage.getItem('tesla_redirect_uri');
+
+  if (!clientId || !clientSecret) {
+    showError('Missing OAuth credentials from session. Please start the flow again.');
+    return;
+  }
+
+  // Clean URL
+  window.history.replaceState({}, '', window.location.pathname);
+
+  const statusEl = document.getElementById('oauth-status');
+  statusEl.style.display = 'block';
+  statusEl.textContent = 'Exchanging code for token...';
+  switchTab('oauth');
+
+  try {
+    const res = await fetch('/api/oauth/callback', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri, code})
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Token exchange failed');
+
+    statusEl.innerHTML = '✅ Connected! Token obtained. Checking your car...';
+
+    // Auto-fill token and check
+    document.getElementById('token').value = data.access_token;
+    await checkTeslaWithToken(data.access_token);
+
+    // Cleanup
+    sessionStorage.removeItem('tesla_client_id');
+    sessionStorage.removeItem('tesla_client_secret');
+    sessionStorage.removeItem('tesla_redirect_uri');
+    sessionStorage.removeItem('tesla_oauth_state');
+  } catch (e) {
+    statusEl.innerHTML = `❌ ${e.message}`;
+  }
+}
+
+async function checkTeslaWithToken(token) {
+  hideResults();
+  try {
+    const res = await fetch('/api/check', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({token})
+    });
+    if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
+    const vehicle = await res.json();
+
+    const geoRes = await fetch('/api/reverse-geocode', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({lat: vehicle.latitude, lng: vehicle.longitude})
+    });
+    const geo = await geoRes.json();
+    showMap(vehicle.latitude, vehicle.longitude, geo.street || 'Unknown');
+
+    const addr = `${geo.house_number} ${geo.street}`.trim();
+    if (!addr || addr === ' ') { showStatus('info', 'Location Found', `Car at ${vehicle.latitude.toFixed(5)}, ${vehicle.longitude.toFixed(5)} but couldn't determine street.`); return; }
+
+    const sweepRes = await fetch('/api/sweep-check', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({address: addr})
+    });
+    const sweepData = await sweepRes.json();
+    if (sweepData.found) {
+      showSweepResults(sweepData, vehicle.vehicle_name, geo.display_name, vehicle.latitude, vehicle.longitude);
+    } else {
+      showStatus('info', 'Street Not Found', `"${addr}" not in Somerville sweeping database.`);
+    }
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+async function checkAddress() {
+  const address = document.getElementById('address').value.trim();
+  if (!address) { showError('Please enter an address'); return; }
+
+  const btn = event.target;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Checking...';
+  hideResults();
+
+  try {
+    const res = await fetch('/api/sweep-check', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({address})
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'API error');
+    if (!data.found) { showError(data.message); return; }
+
+    showSweepResults(data);
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Check Sweeping Schedule';
+  }
+}
+
+async function checkTesla() {
+  const token = document.getElementById('token').value.trim();
+  if (!token) { showError('Please enter your Tesla bearer token'); return; }
+
+  const btn = event.target;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Checking...';
+  hideResults();
+
+  try {
+    // Get vehicle location
+    const res = await fetch('/api/check', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({token})
+    });
+    if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Tesla API error'); }
+    const vehicle = await res.json();
+
+    // Reverse geocode
+    const geoRes = await fetch('/api/reverse-geocode', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({lat: vehicle.latitude, lng: vehicle.longitude})
+    });
+    const geo = await geoRes.json();
+
+    // Show map
+    showMap(vehicle.latitude, vehicle.longitude, geo.street || 'Unknown');
+
+    // Check sweeping with the geocoded address
+    const addr = `${geo.house_number} ${geo.street}`.trim();
+    if (!addr || addr === ' ') { showError('Could not determine street address from GPS'); return; }
+
+    const sweepRes = await fetch('/api/sweep-check', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({address: addr})
+    });
+    const sweepData = await sweepRes.json();
+    if (!sweepRes.ok) throw new Error(sweepData.detail || 'Sweep check failed');
+
+    if (sweepData.found) {
+      showSweepResults(sweepData, vehicle.vehicle_name, geo.display_name, vehicle.latitude, vehicle.longitude);
+    } else {
+      showStatus('info', 'Street Not Found', `"${addr}" not found in Somerville sweeping database. Check posted signs.`);
+    }
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Check My Car';
+  }
+}
+
+function showMap(lat, lng, street) {
+  document.getElementById('map').style.display = 'block';
+  if (!map) {
+    map = L.map('map').setView([lat, lng], 17);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {attribution: '© OpenStreetMap'}).addTo(map);
+    marker = L.marker([lat, lng]).addTo(map);
+  } else {
+    map.setView([lat, lng], 17);
+    marker.setLatLng([lat, lng]);
+  }
+  marker.bindPopup(`<b>Your Car</b><br>${street}`).openPopup();
+}
+
+function showSweepResults(data, vehicleName, fullAddr, lat, lng) {
+  showStatus(data.status, data.title, data.message);
+
+  // Show upcoming events
+  if (data.sweep_events && data.sweep_events.length > 0) {
+    const el = document.getElementById('upcoming');
+    el.style.display = 'block';
+    let html = '<h3>Upcoming Sweeping Events</h3>';
+    for (const evt of data.sweep_events.slice(0, 8)) {
+      const d = new Date(evt.date + 'T12:00:00');
+      const dayName = d.toLocaleDateString('en-US', {weekday: 'short', month: 'short', day: 'numeric'});
+      html += `<div class="event"><span class="event-date">${dayName}</span><span class="event-side">${evt.side} side · ${evt.time}</span></div>`;
+    }
+    el.innerHTML = html;
+  }
+
+  // Show details
+  const details = document.getElementById('details');
+  details.style.display = 'block';
+  let html = '<h3>Details</h3>';
+  html += `<div class="row"><span class="label">Address</span><span>${data.place_name || fullAddr || ''}</span></div>`;
+  if (vehicleName) html += `<div class="row"><span class="label">Vehicle</span><span>${vehicleName}</span></div>`;
+  if (lat) html += `<div class="row"><span class="label">Coordinates</span><span>${lat.toFixed(5)}, ${lng.toFixed(5)}</span></div>`;
+  html += `<div class="row"><span class="label">Data Source</span><span>City of Somerville / Recollect</span></div>`;
+  details.innerHTML = html;
+}
+
+function showStatus(level, title, msg) {
+  const el = document.getElementById('status');
+  el.className = level;
+  el.innerHTML = `<h2>${level === 'danger' ? '🚨' : level === 'warning' ? '⚠️' : level === 'safe' ? '✅' : 'ℹ️'} ${title}</h2><p>${msg}</p>`;
+  el.style.display = 'block';
+}
+
+function showError(msg) {
+  const el = document.getElementById('error');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+
+function hideResults() {
+  document.getElementById('error').style.display = 'none';
+  document.getElementById('status').style.display = 'none';
+  document.getElementById('upcoming').style.display = 'none';
+  document.getElementById('details').style.display = 'none';
+}
+
+// Enter key triggers check
+document.getElementById('address').addEventListener('keydown', e => { if (e.key === 'Enter') checkAddress(); });
+document.getElementById('token').addEventListener('keydown', e => { if (e.key === 'Enter') checkTesla(); });
+
+// Set default redirect URI
+document.getElementById('oauth-redirect').value = window.location.href.split('?')[0].split('#')[0];
+
+// Handle OAuth callback on page load
+handleOAuthCallback();
+</script>
+</body>
+</html>
