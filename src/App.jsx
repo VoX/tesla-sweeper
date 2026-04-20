@@ -383,6 +383,15 @@ export default function App() {
             </>
           ) : (
             <>
+              <div className="oauth-instructions">
+                <p>To connect your Tesla account:</p>
+                <ol>
+                  <li>Go to <a href="https://developer.tesla.com/dashboard" target="_blank" rel="noopener">developer.tesla.com/dashboard</a></li>
+                  <li>Create an application (or use an existing one)</li>
+                  <li>Copy your <strong>Client ID</strong> and <strong>Client Secret</strong></li>
+                  <li>Add <code>{redirectUri}</code> as an allowed Redirect URI in your app settings</li>
+                </ol>
+              </div>
               <label htmlFor="oauth-client-id">Tesla App Client ID</label>
               <input id="oauth-client-id" placeholder="From developer.tesla.com" value={clientId} onChange={e => setClientId(e.target.value)} />
               <label htmlFor="oauth-client-secret">Client Secret</label>
