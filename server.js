@@ -76,8 +76,9 @@ app.post('/api/vehicles', wrap(async (req, res) => {
     return res.status(401).json({ detail: 'Invalid or expired Tesla token' });
   }
   if (!vehiclesRes.ok) {
-    console.error('[vehicles] Tesla API error:', vehiclesRes.status);
-    return res.status(vehiclesRes.status).json({ detail: 'Tesla API error' });
+    const errBody = await vehiclesRes.text().catch(() => '');
+    console.error('[vehicles] Tesla API error:', vehiclesRes.status, errBody);
+    return res.status(vehiclesRes.status).json({ detail: `Tesla API error (${vehiclesRes.status})`, tesla_error: errBody });
   }
 
   const vehicles = (await vehiclesRes.json()).response || [];
@@ -271,7 +272,7 @@ app.post('/api/oauth/app/start', (req, res) => {
   if (!TESLA_APP_CLIENT_ID) return res.status(500).json({ detail: 'App OAuth not configured' });
   const state = randomBytes(32).toString('base64url');
   const scope = 'openid offline_access vehicle_device_data vehicle_location';
-  const params = new URLSearchParams({ response_type: 'code', client_id: TESLA_APP_CLIENT_ID, redirect_uri: TESLA_APP_REDIRECT_URI, scope, state, prompt: 'login', locale: 'en-US' });
+  const params = new URLSearchParams({ response_type: 'code', client_id: TESLA_APP_CLIENT_ID, redirect_uri: TESLA_APP_REDIRECT_URI, scope, state, prompt: 'login', prompt_missing_scopes: 'true', locale: 'en-US' });
   res.json({ url: `https://auth.tesla.com/oauth2/v3/authorize?${params}`, state });
 });
 
