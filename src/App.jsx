@@ -319,7 +319,7 @@ export default function App() {
 
     post('oauth/callback', { client_id: cId, client_secret: cSecret, redirect_uri: rUri, code })
       .then(async (data) => {
-        setTokens({ access_token: data.access_token, refresh_token: data.refresh_token, client_id: cId, client_secret: cSecret, expires_at: Date.now() + data.expires_in * 1000 });
+        setTokens({ access_token: data.access_token, refresh_token: data.refresh_token, client_id: cId, expires_at: Date.now() + data.expires_in * 1000 });
         setToken(data.access_token);
         setOauthStatus('\u2705 Connected! Checking your car...');
         ['tesla_client_id', 'tesla_client_secret', 'tesla_redirect_uri', 'tesla_oauth_state'].forEach(k => sessionStorage.removeItem(k));
