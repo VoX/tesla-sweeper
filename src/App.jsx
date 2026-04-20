@@ -122,7 +122,10 @@ function clientToday() {
 }
 
 export default function App() {
-  const [tab, setTab] = useState('address');
+  const [tab, setTab] = useState(() => {
+    const p = new URLSearchParams(window.location.search).get('tab');
+    return ['address', 'app', 'oauth'].includes(p) ? p : 'address';
+  });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [sweepData, setSweepData] = useState(null);
@@ -174,10 +177,11 @@ export default function App() {
     if (refreshPromise.current) return refreshPromise.current;
     refreshPromise.current = (async () => {
       try {
-        const data = await post('oauth/refresh', {
-          client_id: tokens.client_id,
-          refresh_token: tokens.refresh_token,
-        });
+        const refreshUrl = tokens.oauth_mode === 'app' ? 'oauth/app/refresh' : 'oauth/refresh';
+        const refreshBody = tokens.oauth_mode === 'app'
+          ? { refresh_token: tokens.refresh_token }
+          : { client_id: tokens.client_id, refresh_token: tokens.refresh_token };
+        const data = await post(refreshUrl, refreshBody);
         const newTokens = {
           ...tokens,
           access_token: data.access_token,
@@ -290,6 +294,21 @@ export default function App() {
     }
   };
 
+  const handleAppOAuthStart = async () => {
+    setLoading(true);
+    setOauthStatus('Redirecting to Tesla...');
+    try {
+      const data = await post('oauth/app/start', {});
+      sessionStorage.setItem('tesla_oauth_state', data.state);
+      sessionStorage.setItem('tesla_oauth_mode', 'app');
+      window.location.href = data.url;
+    } catch (e) {
+      setError('Failed to start OAuth: ' + e.message);
+      setLoading(false);
+      setOauthStatus('');
+    }
+  };
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const code = params.get('code');
@@ -304,18 +323,30 @@ export default function App() {
       return;
     }
 
-    const cId = sessionStorage.getItem('tesla_client_id');
-    const cSecret = sessionStorage.getItem('tesla_client_secret');
-    const rUri = sessionStorage.getItem('tesla_redirect_uri');
-    if (!cId || !cSecret) { setError('Missing OAuth credentials. Start the flow again.'); return; }
+    const mode = sessionStorage.getItem('tesla_oauth_mode') || 'custom';
+    const isApp = mode === 'app';
 
-    setTab('oauth');
     setOauthStatus('Exchanging code for token...');
     setLoading(true);
+    setTab(isApp ? 'app' : 'oauth');
 
-    post('oauth/callback', { client_id: cId, client_secret: cSecret, redirect_uri: rUri, code })
+    const callbackUrl = isApp ? 'oauth/app/callback' : 'oauth/callback';
+    const callbackBody = isApp
+      ? { code }
+      : (() => {
+          const cId = sessionStorage.getItem('tesla_client_id');
+          const cSecret = sessionStorage.getItem('tesla_client_secret');
+          const rUri = sessionStorage.getItem('tesla_redirect_uri');
+          if (!cId || !cSecret) { setError('Missing OAuth credentials. Start the flow again.'); setLoading(false); return null; }
+          return { client_id: cId, client_secret: cSecret, redirect_uri: rUri, code };
+        })();
+
+    if (!callbackBody) return;
+
+    post(callbackUrl, callbackBody)
       .then(async (data) => {
-        setTokens({ access_token: data.access_token, refresh_token: data.refresh_token, client_id: cId, expires_at: Date.now() + data.expires_in * 1000 });
+        const clientId = isApp ? 'app' : sessionStorage.getItem('tesla_client_id');
+        setTokens({ access_token: data.access_token, refresh_token: data.refresh_token, client_id: clientId, oauth_mode: mode, expires_at: Date.now() + data.expires_in * 1000 });
         setToken(data.access_token);
         setOauthStatus('\u2705 Connected! Checking your car...');
         await checkVehicle(data.access_token);
@@ -338,8 +369,8 @@ export default function App() {
 
   const tabs = [
     { id: 'address', icon: '\uD83D\uDCCD', label: 'Address' },
-    { id: 'oauth', icon: '\uD83D\uDD10', label: 'Tesla OAuth' },
-    { id: 'tesla', icon: '\uD83D\uDD11', label: 'Bearer Token' },
+    { id: 'app', icon: '\uD83D\uDE97', label: 'Tesla Login' },
+    { id: 'oauth', icon: '\uD83D\uDD10', label: 'Custom OAuth' },
   ];
 
   return (
@@ -369,18 +400,36 @@ export default function App() {
         </div>
       )}
 
+      {tab === 'app' && (
+        <div role="tabpanel">
+          {tokens ? (
+            <>
+              <div className="oauth-status">{oauthStatus || '\u2705 Connected'}</div>
+              <button onClick={() => { reset(); checkVehicle(tokens.access_token).catch(e => setError(e.message)).finally(() => setLoading(false)); setLoading(true); }} disabled={loading}>{loading ? 'Checking...' : 'Check My Car'}</button>
+              <button className="disconnect-btn" onClick={logout}>Disconnect</button>
+            </>
+          ) : (
+            <>
+              <p style={{fontSize: '0.85rem', color: '#8b949e', marginBottom: 16}}>Sign in with your Tesla account to locate your car and check the sweeping schedule.</p>
+              <button onClick={handleAppOAuthStart} disabled={loading}>{loading ? 'Connecting...' : 'Connect Tesla Account'}</button>
+              {oauthStatus && <div className="oauth-status">{oauthStatus}</div>}
+            </>
+          )}
+        </div>
+      )}
+
       {tab === 'oauth' && (
         <div role="tabpanel">
           {tokens ? (
             <>
               <div className="oauth-status">{oauthStatus || '\u2705 Connected'}</div>
-              <button onClick={() => { reset(); handleCheckTesla(); }} disabled={loading}>{loading ? 'Checking...' : 'Check My Car'}</button>
+              <button onClick={() => { reset(); checkVehicle(tokens.access_token).catch(e => setError(e.message)).finally(() => setLoading(false)); setLoading(true); }} disabled={loading}>{loading ? 'Checking...' : 'Check My Car'}</button>
               <button className="disconnect-btn" onClick={logout}>Disconnect</button>
             </>
           ) : (
             <>
               <div className="oauth-instructions">
-                <p>To connect your Tesla account:</p>
+                <p>Use your own Tesla developer app credentials:</p>
                 <ol>
                   <li>Go to <a href="https://developer.tesla.com/dashboard" target="_blank" rel="noopener">developer.tesla.com/dashboard</a></li>
                   <li>Create an application (or use an existing one)</li>
@@ -402,14 +451,6 @@ export default function App() {
             </>
           )}
           {!tokens && oauthStatus && <div className="oauth-status">{oauthStatus}</div>}
-        </div>
-      )}
-
-      {tab === 'tesla' && (
-        <div role="tabpanel">
-          <label htmlFor="token">Tesla API Bearer Token</label>
-          <input id="token" type="password" placeholder="Paste your Tesla bearer token..." value={token} onChange={e => setToken(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleCheckTesla()} />
-          <button onClick={handleCheckTesla} disabled={loading}>{loading ? 'Checking...' : 'Check My Car'}</button>
         </div>
       )}
 

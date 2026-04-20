@@ -2,10 +2,23 @@ import express from 'express';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'fs';
+
+// Load .env
+try {
+  for (const line of readFileSync(join(dirname(fileURLToPath(import.meta.url)), '.env'), 'utf8').split('\n')) {
+    const m = line.match(/^(\w+)=(.*)$/);
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
+  }
+} catch {}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json());
+
+const TESLA_APP_CLIENT_ID = process.env.TESLA_CLIENT_ID || '';
+const TESLA_APP_CLIENT_SECRET = process.env.TESLA_CLIENT_SECRET || '';
+const TESLA_APP_REDIRECT_URI = process.env.TESLA_REDIRECT_URI || '';
 
 const TESLA_BASE = 'https://fleet-api.prd.na.vn.cloud.tesla.com';
 const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
@@ -218,6 +231,31 @@ app.post('/api/sweep-check', wrap(async (req, res) => {
   });
 }));
 
+// Pre-configured app OAuth — credentials stay server-side
+app.post('/api/oauth/app/start', (req, res) => {
+  if (!TESLA_APP_CLIENT_ID) return res.status(500).json({ detail: 'App OAuth not configured' });
+  const state = randomBytes(32).toString('base64url');
+  const scope = 'openid offline_access vehicle_device_data vehicle_location';
+  const params = new URLSearchParams({ response_type: 'code', client_id: TESLA_APP_CLIENT_ID, redirect_uri: TESLA_APP_REDIRECT_URI, scope, state, prompt: 'login', locale: 'en-US' });
+  res.json({ url: `https://auth.tesla.com/oauth2/v3/authorize?${params}`, state });
+});
+
+app.post('/api/oauth/app/callback', wrap(async (req, res) => {
+  const { code } = req.body;
+  const data = await teslaTokenExchange({
+    grant_type: 'authorization_code', client_id: TESLA_APP_CLIENT_ID, client_secret: TESLA_APP_CLIENT_SECRET,
+    code, redirect_uri: TESLA_APP_REDIRECT_URI, audience: TESLA_BASE,
+  });
+  res.json({ access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in, token_type: data.token_type });
+}));
+
+app.post('/api/oauth/app/refresh', wrap(async (req, res) => {
+  const { refresh_token } = req.body;
+  const data = await teslaTokenExchange({ grant_type: 'refresh_token', client_id: TESLA_APP_CLIENT_ID, refresh_token });
+  res.json({ access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in });
+}));
+
+// Custom OAuth — user provides their own credentials
 app.post('/api/oauth/start', wrap(async (req, res) => {
   const { client_id, client_secret, redirect_uri, register = false, scope = 'openid offline_access vehicle_device_data vehicle_location' } = req.body;
 
