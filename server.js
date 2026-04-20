@@ -234,6 +234,7 @@ app.post('/api/oauth/start', wrap(async (req, res) => {
         headers: { Authorization: `Bearer ${partnerToken.access_token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ domain: 'claw.bitvox.me' }),
       });
+      await new Promise(r => setTimeout(r, 3000));
     } catch (e) {
       console.error('Partner registration failed:', e.message);
     }

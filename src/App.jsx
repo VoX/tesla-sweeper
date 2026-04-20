@@ -282,7 +282,7 @@ export default function App() {
     sessionStorage.setItem('tesla_client_secret', clientSecret);
     sessionStorage.setItem('tesla_redirect_uri', uri);
     setLoading(true);
-    setOauthStatus('Redirecting to Tesla...');
+    setOauthStatus(registerPartner ? 'Registering with Tesla Fleet API...' : 'Redirecting to Tesla...');
     try {
       const data = await post('oauth/start', { client_id: clientId, client_secret: clientSecret, redirect_uri: uri, register: registerPartner });
       sessionStorage.setItem('tesla_oauth_state', data.state);
