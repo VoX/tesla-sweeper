@@ -126,7 +126,7 @@ app.post('/api/sweep-check', wrap(async (req, res) => {
   if (!eventsRes.ok) return res.status(502).json({ detail: 'Recollect events error' });
 
   const eventsData = await eventsRes.json();
-  const rawEvents = Array.isArray(eventsData) ? eventsData : (eventsData.events || eventsData);
+  const rawEvents = Array.isArray(eventsData) ? eventsData : (eventsData.events || []);
 
   const sweepEvents = [];
   for (const event of rawEvents) {
@@ -161,8 +161,7 @@ app.post('/api/sweep-check', wrap(async (req, res) => {
 
   if (sweepingToday.length) {
     const sides = sideLabel(sweepingToday);
-    const now = new Date();
-    const pastNoon = now.getHours() >= 12;
+    const pastNoon = req.body.past_noon || false;
     if (pastNoon) {
       status = 'info'; title = 'Sweeping Done for Today';
       message = `Sweeping was scheduled today (${sides}, 8AM-12PM). It's past noon — you're clear.`;

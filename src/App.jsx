@@ -43,12 +43,16 @@ function MapView({ lat, lng, street }) {
   const markerRef = useRef(null);
 
   useEffect(() => {
+    return () => {
+      if (mapInstance.current) { mapInstance.current.remove(); mapInstance.current = null; markerRef.current = null; }
+    };
+  }, []);
+
+  useEffect(() => {
     if (!mapRef.current || lat == null) return;
     if (!mapInstance.current) {
       mapInstance.current = L.map(mapRef.current).setView([lat, lng], 17);
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '\u00A9 OpenStreetMap',
-      }).addTo(mapInstance.current);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '\u00A9 OpenStreetMap' }).addTo(mapInstance.current);
       markerRef.current = L.marker([lat, lng]).addTo(mapInstance.current);
     } else {
       mapInstance.current.setView([lat, lng], 17);
@@ -61,14 +65,6 @@ function MapView({ lat, lng, street }) {
     popup.appendChild(document.createElement('br'));
     popup.appendChild(document.createTextNode(street || 'Unknown'));
     markerRef.current.bindPopup(popup).openPopup();
-
-    return () => {
-      if (mapInstance.current) {
-        mapInstance.current.remove();
-        mapInstance.current = null;
-        markerRef.current = null;
-      }
-    };
   }, [lat, lng, street]);
 
   if (lat == null) return null;
@@ -243,7 +239,7 @@ export default function App() {
       return;
     }
 
-    const data = await post('sweep-check', { address: addr, today_date: clientToday() });
+    const data = await post('sweep-check', { address: addr, today_date: clientToday(), past_noon: new Date().getHours() >= 12 });
     if (data.found) setSweepData(data);
     else setError(`"${addr}" not in Somerville sweeping database.`);
   };
@@ -253,7 +249,7 @@ export default function App() {
     reset();
     setLoading(true);
     try {
-      const data = await post('sweep-check', { address: address.trim(), today_date: clientToday() });
+      const data = await post('sweep-check', { address: address.trim(), today_date: clientToday(), past_noon: new Date().getHours() >= 12 });
       if (!data.found) { setError(data.message); return; }
       setSweepData(data);
       if (data.latitude && data.longitude) {
@@ -277,7 +273,7 @@ export default function App() {
 
   const handleOAuthStart = async () => {
     if (!clientId || !clientSecret) { setError('Client ID and Secret are required'); return; }
-    const uri = redirectUri || window.location.href.split('?')[0];
+    const uri = redirectUri;
     sessionStorage.setItem('tesla_client_id', clientId);
     sessionStorage.setItem('tesla_client_secret', clientSecret);
     sessionStorage.setItem('tesla_redirect_uri', uri);
@@ -322,14 +318,13 @@ export default function App() {
         setTokens({ access_token: data.access_token, refresh_token: data.refresh_token, client_id: cId, expires_at: Date.now() + data.expires_in * 1000 });
         setToken(data.access_token);
         setOauthStatus('\u2705 Connected! Checking your car...');
-        ['tesla_client_id', 'tesla_client_secret', 'tesla_redirect_uri', 'tesla_oauth_state'].forEach(k => sessionStorage.removeItem(k));
         await checkVehicle(data.access_token);
       })
-      .catch(e => {
-        setOauthStatus('\u274C ' + e.message);
+      .catch(e => setOauthStatus('\u274C ' + e.message))
+      .finally(() => {
         ['tesla_client_id', 'tesla_client_secret', 'tesla_redirect_uri', 'tesla_oauth_state'].forEach(k => sessionStorage.removeItem(k));
-      })
-      .finally(() => setLoading(false));
+        setLoading(false);
+      });
   }, []);
 
   useEffect(() => {

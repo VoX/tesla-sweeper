@@ -33,8 +33,6 @@ button:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
 .event-yours .event-side { color: #f8514999; }
 .event-other .event-date { color: #8b949e; }
 .event-other .event-side { color: #484f58; }
-.event-date { color: #c9d1d9; }
-.event-side { color: #8b949e; }
 .event-badge { font-size: 0.7rem; background: #f85149; color: #fff; padding: 1px 5px; border-radius: 3px; margin-left: 6px; font-weight: 600; vertical-align: middle; }
 .error { color: #f85149; font-size: 0.85rem; }
 .error-box { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
