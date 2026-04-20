@@ -91,7 +91,8 @@ function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
           {data.sweep_events.slice(0, 8).map((evt, i) => {
             const yourSide = data.car_side && (evt.side === data.car_side || evt.side === 'both');
             const evtDate = new Date(evt.date + 'T12:00:00');
-            const daysAway = Math.round((evtDate - new Date(new Date().toDateString())) / 86400000);
+            const todayMid = new Date(clientToday() + 'T12:00:00');
+            const daysAway = Math.round((evtDate - todayMid) / 86400000);
             const daysLabel = daysAway === 0 ? 'today' : daysAway === 1 ? 'tomorrow' : `${daysAway} days`;
             return (
               <div className={`event ${yourSide ? 'event-yours' : 'event-other'}`} key={i}>
