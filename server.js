@@ -219,12 +219,30 @@ app.post('/api/sweep-check', wrap(async (req, res) => {
   });
 }));
 
-app.post('/api/oauth/start', (req, res) => {
-  const { client_id, redirect_uri, scope = 'openid offline_access vehicle_device_data vehicle_location' } = req.body;
+app.post('/api/oauth/start', wrap(async (req, res) => {
+  const { client_id, client_secret, redirect_uri, register = false, scope = 'openid offline_access vehicle_device_data vehicle_location' } = req.body;
+
+  if (register) {
+    try {
+      const partnerToken = await teslaTokenExchange({
+        grant_type: 'client_credentials', client_id, client_secret,
+        scope: 'openid vehicle_device_data vehicle_location',
+        audience: TESLA_BASE,
+      });
+      await fetchWithTimeout(`${TESLA_BASE}/api/1/partner_accounts`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${partnerToken.access_token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: 'claw.bitvox.me' }),
+      });
+    } catch (e) {
+      console.error('Partner registration failed:', e.message);
+    }
+  }
+
   const state = randomBytes(32).toString('base64url');
   const params = new URLSearchParams({ response_type: 'code', client_id, redirect_uri, scope, state, prompt: 'login', locale: 'en-US' });
   res.json({ url: `https://auth.tesla.com/oauth2/v3/authorize?${params}`, state });
-});
+}));
 
 app.post('/api/oauth/callback', wrap(async (req, res) => {
   const { client_id, client_secret, redirect_uri, code } = req.body;

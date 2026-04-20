@@ -145,6 +145,7 @@ export default function App() {
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
   const [redirectUri, setRedirectUri] = useState(() => window.location.href.split('?')[0].split('#')[0]);
+  const [registerPartner, setRegisterPartner] = useState(false);
 
   const refreshPromise = useRef(null);
 
@@ -282,7 +283,7 @@ export default function App() {
     setLoading(true);
     setOauthStatus('Redirecting to Tesla...');
     try {
-      const data = await post('oauth/start', { client_id: clientId, redirect_uri: uri });
+      const data = await post('oauth/start', { client_id: clientId, client_secret: clientSecret, redirect_uri: uri, register: registerPartner });
       sessionStorage.setItem('tesla_oauth_state', data.state);
       window.location.href = data.url;
     } catch (e) {
@@ -388,6 +389,10 @@ export default function App() {
               <input id="oauth-client-secret" type="password" placeholder="Your app's client secret" value={clientSecret} onChange={e => setClientSecret(e.target.value)} />
               <label htmlFor="oauth-redirect">Redirect URI</label>
               <input id="oauth-redirect" placeholder="e.g. https://claw.bitvox.me/sweeper/" value={redirectUri} onChange={e => setRedirectUri(e.target.value)} />
+              <label className="checkbox-label">
+                <input type="checkbox" checked={registerPartner} onChange={e => setRegisterPartner(e.target.checked)} />
+                Register app with Tesla Fleet API (first-time setup)
+              </label>
               <button onClick={handleOAuthStart} disabled={loading}>{loading ? 'Connecting...' : 'Connect Tesla Account'}</button>
             </>
           )}
