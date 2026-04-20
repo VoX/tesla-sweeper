@@ -132,7 +132,7 @@ export default function App() {
   const [sweepData, setSweepData] = useState(null);
   const [vehicleInfo, setVehicleInfo] = useState(null);
   const [vehicles, setVehicles] = useState(null);
-  const [selectedVehicle, setSelectedVehicle] = useState(null);
+  const [selectedVehicle, setSelectedVehicle] = useState(() => localStorage.getItem('tesla_selected_vehicle') || null);
   const [mapPos, setMapPos] = useState(null);
   const [oauthStatus, setOauthStatus] = useState('');
   const [tokens, setTokens] = useState(() => {
@@ -151,14 +151,29 @@ export default function App() {
 
   const refreshPromise = useRef(null);
 
+  const autoCheckedRef = useRef(false);
+
   useEffect(() => {
     if (tokens) {
       localStorage.setItem('tesla_tokens', JSON.stringify(tokens));
-      if (!vehicles) fetchVehicles(tokens.access_token).catch(() => {});
+      if (!vehicles) {
+        fetchVehicles(tokens.access_token).then(vlist => {
+          const vid = selectedVehicle || (vlist.length === 1 ? vlist[0].id : null);
+          if (vid && !autoCheckedRef.current) {
+            autoCheckedRef.current = true;
+            checkVehicle(tokens.access_token, vid).catch(() => {});
+          }
+        }).catch(() => {});
+      }
     } else {
       localStorage.removeItem('tesla_tokens');
     }
   }, [tokens]);
+
+  useEffect(() => {
+    if (selectedVehicle) localStorage.setItem('tesla_selected_vehicle', selectedVehicle);
+    else localStorage.removeItem('tesla_selected_vehicle');
+  }, [selectedVehicle]);
 
   const logout = () => {
     setTokens(null);
