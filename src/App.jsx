@@ -141,7 +141,6 @@ export default function App() {
 
   const [address, setAddress] = useState(() => new URLSearchParams(window.location.search).get('address') || '');
   const autoLookupDone = useRef(false);
-  const [token, setToken] = useState('');
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
   const [redirectUri, setRedirectUri] = useState(() => window.location.href.split('?')[0].split('#')[0]);
@@ -152,7 +151,7 @@ export default function App() {
   useEffect(() => {
     if (tokens) {
       localStorage.setItem('tesla_tokens', JSON.stringify(tokens));
-      setToken(tokens.access_token);
+
     } else {
       localStorage.removeItem('tesla_tokens');
     }
@@ -160,7 +159,7 @@ export default function App() {
 
   const logout = () => {
     setTokens(null);
-    setToken('');
+
     setOauthStatus('');
     reset();
   };
@@ -266,11 +265,11 @@ export default function App() {
     finally { setLoading(false); }
   };
 
-  const handleCheckTesla = async () => {
-    if (!token.trim()) { setError('Please enter your Tesla bearer token'); return; }
+  const handleCheckCar = async () => {
+    if (!tokens?.access_token) return;
     reset();
     setLoading(true);
-    try { await checkVehicle(token.trim()); }
+    try { await checkVehicle(tokens.access_token); }
     catch (e) { setError(e.message); }
     finally { setLoading(false); }
   };
@@ -405,7 +404,7 @@ export default function App() {
           {tokens ? (
             <>
               <div className="oauth-status">{oauthStatus || '\u2705 Connected'}</div>
-              <button onClick={() => { reset(); checkVehicle(tokens.access_token).catch(e => setError(e.message)).finally(() => setLoading(false)); setLoading(true); }} disabled={loading}>{loading ? 'Checking...' : 'Check My Car'}</button>
+              <button onClick={handleCheckCar} disabled={loading}>{loading ? 'Checking...' : 'Check My Car'}</button>
               <button className="disconnect-btn" onClick={logout}>Disconnect</button>
             </>
           ) : (
@@ -423,7 +422,7 @@ export default function App() {
           {tokens ? (
             <>
               <div className="oauth-status">{oauthStatus || '\u2705 Connected'}</div>
-              <button onClick={() => { reset(); checkVehicle(tokens.access_token).catch(e => setError(e.message)).finally(() => setLoading(false)); setLoading(true); }} disabled={loading}>{loading ? 'Checking...' : 'Check My Car'}</button>
+              <button onClick={handleCheckCar} disabled={loading}>{loading ? 'Checking...' : 'Check My Car'}</button>
               <button className="disconnect-btn" onClick={logout}>Disconnect</button>
             </>
           ) : (
