@@ -294,14 +294,13 @@ export default function App() {
 
   const handleOAuthStart = async () => {
     if (!clientId || !clientSecret) { setError('Client ID and Secret are required'); return; }
-    const uri = redirectUri;
     sessionStorage.setItem('tesla_client_id', clientId);
     sessionStorage.setItem('tesla_client_secret', clientSecret);
-    sessionStorage.setItem('tesla_redirect_uri', uri);
+    sessionStorage.setItem('tesla_redirect_uri', redirectUri);
     setLoading(true);
     setOauthStatus(registerPartner ? 'Registering with Tesla Fleet API...' : 'Redirecting to Tesla...');
     try {
-      const data = await post('oauth/start', { client_id: clientId, client_secret: clientSecret, redirect_uri: uri, register: registerPartner });
+      const data = await post('oauth/start', { client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri, register: registerPartner });
       sessionStorage.setItem('tesla_oauth_state', data.state);
       window.location.href = data.url;
     } catch (e) {
@@ -362,8 +361,8 @@ export default function App() {
 
     post(callbackUrl, callbackBody)
       .then(async (data) => {
-        const clientId = isApp ? 'app' : sessionStorage.getItem('tesla_client_id');
-        setTokens({ access_token: data.access_token, refresh_token: data.refresh_token, client_id: clientId, oauth_mode: mode, expires_at: Date.now() + data.expires_in * 1000 });
+        const tokenClientId = isApp ? 'app' : sessionStorage.getItem('tesla_client_id');
+        setTokens({ access_token: data.access_token, refresh_token: data.refresh_token, client_id: tokenClientId, oauth_mode: mode, expires_at: Date.now() + data.expires_in * 1000 });
         setOauthStatus('\u2705 Connected! Loading vehicles...');
         const vlist = await fetchVehicles(data.access_token);
         if (vlist.length === 0) {

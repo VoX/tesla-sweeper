@@ -4,15 +4,15 @@ import { dirname, join } from 'path';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'fs';
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
 // Load .env
 try {
-  for (const line of readFileSync(join(dirname(fileURLToPath(import.meta.url)), '.env'), 'utf8').split('\n')) {
+  for (const line of readFileSync(join(__dirname, '.env'), 'utf8').split('\n')) {
     const m = line.match(/^(\w+)=(.*)$/);
     if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
   }
 } catch {}
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json());
 

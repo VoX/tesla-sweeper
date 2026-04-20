@@ -24,10 +24,10 @@ button:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
 .map-container { height: 250px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #30363d; }
 .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
 .card h3 { font-size: 0.9rem; color: #58a6ff; margin-bottom: 8px; }
-.card .row, .event { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.85rem; border-bottom: 1px solid #21262d; }
+.card .row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.85rem; border-bottom: 1px solid #21262d; }
 .card .row:last-child, .event:last-child { border: none; }
 .card .row .label { color: #8b949e; }
-.event { padding: 6px 0; }
+.event { display: flex; justify-content: space-between; padding: 6px 0; font-size: 0.85rem; border-bottom: 1px solid #21262d; }
 .event-yours { background: #2d0a0a; border-radius: 4px; padding: 6px 8px; margin: 2px -8px; }
 .event-yours .event-date { color: #f85149; }
 .event-yours .event-side { color: #f8514999; }
