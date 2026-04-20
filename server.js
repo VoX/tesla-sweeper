@@ -62,32 +62,67 @@ async function teslaTokenExchange(params) {
   return r.json();
 }
 
-app.post('/api/check', wrap(async (req, res) => {
+// List vehicles on account
+app.post('/api/vehicles', wrap(async (req, res) => {
   const { token } = req.body;
+  if (!token) return res.status(400).json({ detail: 'Token required' });
+
+  console.log('[vehicles] Fetching vehicle list');
+  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const vehiclesRes = await fetchWithTimeout(`${TESLA_BASE}/api/1/vehicles`, { headers });
+
+  if (vehiclesRes.status === 401) {
+    console.log('[vehicles] 401 — token invalid or expired');
+    return res.status(401).json({ detail: 'Invalid or expired Tesla token' });
+  }
+  if (!vehiclesRes.ok) {
+    console.error('[vehicles] Tesla API error:', vehiclesRes.status);
+    return res.status(vehiclesRes.status).json({ detail: 'Tesla API error' });
+  }
+
+  const vehicles = (await vehiclesRes.json()).response || [];
+  console.log(`[vehicles] Found ${vehicles.length} vehicle(s)`);
+  res.json({
+    vehicles: vehicles.map(v => ({ id: v.id, name: v.display_name || 'Unknown', vin: v.vin, state: v.state })),
+  });
+}));
+
+// Get location for a specific vehicle
+app.post('/api/check', wrap(async (req, res) => {
+  const { token, vehicle_id } = req.body;
   if (!token) return res.status(400).json({ detail: 'Token required' });
 
   const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 
-  const vehiclesRes = await fetchWithTimeout(`${TESLA_BASE}/api/1/vehicles`, { headers });
-  if (vehiclesRes.status === 401) return res.status(401).json({ detail: 'Invalid or expired Tesla token' });
-  if (!vehiclesRes.ok) return res.status(vehiclesRes.status).json({ detail: 'Tesla API error' });
+  let vid = vehicle_id;
+  if (!vid) {
+    const vehiclesRes = await fetchWithTimeout(`${TESLA_BASE}/api/1/vehicles`, { headers });
+    if (vehiclesRes.status === 401) return res.status(401).json({ detail: 'Invalid or expired Tesla token' });
+    if (!vehiclesRes.ok) return res.status(vehiclesRes.status).json({ detail: 'Tesla API error' });
+    const vehicles = (await vehiclesRes.json()).response || [];
+    if (!vehicles.length) return res.json({ no_vehicles: true });
+    vid = vehicles[0].id;
+  }
 
-  const vehicles = (await vehiclesRes.json()).response || [];
-  if (!vehicles.length) return res.status(404).json({ detail: 'No vehicles found on this account' });
-
-  const vehicle = vehicles[0];
+  console.log(`[check] Getting location for vehicle ${vid}`);
   const locRes = await fetchWithTimeout(
-    `${TESLA_BASE}/api/1/vehicles/${vehicle.id}/vehicle_data?endpoints=location_data`,
+    `${TESLA_BASE}/api/1/vehicles/${vid}/vehicle_data?endpoints=location_data`,
     { headers }
   );
   if (locRes.status === 408) return res.status(408).json({ detail: 'Vehicle is asleep. Open the Tesla app to wake it, then retry.' });
-  if (!locRes.ok) return res.status(locRes.status).json({ detail: 'Failed to get vehicle data' });
+  if (!locRes.ok) {
+    console.error(`[check] Vehicle data error: ${locRes.status}`);
+    return res.status(locRes.status).json({ detail: 'Failed to get vehicle data' });
+  }
 
-  const driveState = (await locRes.json()).response?.drive_state || {};
+  const locData = await locRes.json();
+  const driveState = locData.response?.drive_state || {};
   const { latitude, longitude } = driveState;
+  console.log(`[check] Location: ${latitude}, ${longitude}`);
   if (latitude == null || longitude == null) return res.status(404).json({ detail: 'Could not determine vehicle location' });
 
-  res.json({ vehicle_name: vehicle.display_name || 'Unknown', latitude, longitude });
+  const vehicleName = locData.response?.display_name || locData.response?.vehicle_config?.car_type || 'Unknown';
+  res.json({ vehicle_name: vehicleName, latitude, longitude });
 }));
 
 app.post('/api/reverse-geocode', wrap(async (req, res) => {
@@ -242,10 +277,12 @@ app.post('/api/oauth/app/start', (req, res) => {
 
 app.post('/api/oauth/app/callback', wrap(async (req, res) => {
   const { code } = req.body;
+  console.log('[oauth/app] Exchanging code for token');
   const data = await teslaTokenExchange({
     grant_type: 'authorization_code', client_id: TESLA_APP_CLIENT_ID, client_secret: TESLA_APP_CLIENT_SECRET,
     code, redirect_uri: TESLA_APP_REDIRECT_URI, audience: TESLA_BASE,
   });
+  console.log('[oauth/app] Token obtained, expires_in:', data.expires_in);
   res.json({ access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in, token_type: data.token_type });
 }));
 

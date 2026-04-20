@@ -124,12 +124,15 @@ function clientToday() {
 export default function App() {
   const [tab, setTab] = useState(() => {
     const p = new URLSearchParams(window.location.search).get('tab');
-    return ['address', 'app', 'oauth'].includes(p) ? p : 'address';
+    if (['address', 'app', 'oauth'].includes(p)) return p;
+    return new URLSearchParams(window.location.search).get('address') ? 'address' : 'app';
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [sweepData, setSweepData] = useState(null);
   const [vehicleInfo, setVehicleInfo] = useState(null);
+  const [vehicles, setVehicles] = useState(null);
+  const [selectedVehicle, setSelectedVehicle] = useState(null);
   const [mapPos, setMapPos] = useState(null);
   const [oauthStatus, setOauthStatus] = useState('');
   const [tokens, setTokens] = useState(() => {
@@ -151,7 +154,7 @@ export default function App() {
   useEffect(() => {
     if (tokens) {
       localStorage.setItem('tesla_tokens', JSON.stringify(tokens));
-
+      if (!vehicles) fetchVehicles(tokens.access_token).catch(() => {});
     } else {
       localStorage.removeItem('tesla_tokens');
     }
@@ -159,7 +162,8 @@ export default function App() {
 
   const logout = () => {
     setTokens(null);
-
+    setVehicles(null);
+    setSelectedVehicle(null);
     setOauthStatus('');
     reset();
   };
@@ -188,7 +192,6 @@ export default function App() {
           expires_at: Date.now() + data.expires_in * 1000,
         };
         setTokens(newTokens);
-        setToken(data.access_token);
         setOauthStatus('\u2705 Token refreshed');
         return data.access_token;
       } catch (e) {
@@ -220,16 +223,31 @@ export default function App() {
     return () => clearInterval(interval);
   }, [tokens, refreshToken]);
 
-  const checkVehicle = async (accessToken) => {
+  const fetchVehicles = async (accessToken) => {
+    const data = await post('vehicles', { token: accessToken });
+    setVehicles(data.vehicles);
+    if (data.vehicles.length === 1) setSelectedVehicle(data.vehicles[0].id);
+    return data.vehicles;
+  };
+
+  const checkVehicle = async (accessToken, vehicleId) => {
     let vehicle;
+    const body = { token: accessToken };
+    if (vehicleId) body.vehicle_id = vehicleId;
     try {
-      vehicle = await post('check', { token: accessToken });
+      vehicle = await post('check', body);
     } catch (e) {
       if (e.message.includes('401') && tokens?.refresh_token) {
         const newToken = await refreshToken();
-        if (newToken) vehicle = await post('check', { token: newToken });
+        if (newToken) vehicle = await post('check', { ...body, token: newToken });
         else throw e;
       } else throw e;
+    }
+
+    if (vehicle.no_vehicles) {
+      setVehicles([]);
+      setOauthStatus('\u2705 Connected — no vehicles on this account');
+      return;
     }
 
     const geo = await post('reverse-geocode', { lat: vehicle.latitude, lng: vehicle.longitude });
@@ -265,11 +283,11 @@ export default function App() {
     finally { setLoading(false); }
   };
 
-  const handleCheckCar = async () => {
+  const handleCheckCar = async (vid) => {
     if (!tokens?.access_token) return;
     reset();
     setLoading(true);
-    try { await checkVehicle(tokens.access_token); }
+    try { await checkVehicle(tokens.access_token, vid || selectedVehicle); }
     catch (e) { setError(e.message); }
     finally { setLoading(false); }
   };
@@ -346,9 +364,16 @@ export default function App() {
       .then(async (data) => {
         const clientId = isApp ? 'app' : sessionStorage.getItem('tesla_client_id');
         setTokens({ access_token: data.access_token, refresh_token: data.refresh_token, client_id: clientId, oauth_mode: mode, expires_at: Date.now() + data.expires_in * 1000 });
-        setToken(data.access_token);
-        setOauthStatus('\u2705 Connected! Checking your car...');
-        await checkVehicle(data.access_token);
+        setOauthStatus('\u2705 Connected! Loading vehicles...');
+        const vlist = await fetchVehicles(data.access_token);
+        if (vlist.length === 0) {
+          setOauthStatus('\u2705 Connected — no vehicles on this account');
+        } else if (vlist.length === 1) {
+          setOauthStatus('\u2705 Connected! Checking your car...');
+          await checkVehicle(data.access_token, vlist[0].id);
+        } else {
+          setOauthStatus(`\u2705 Connected — ${vlist.length} vehicles found. Select one to check.`);
+        }
       })
       .catch(e => setOauthStatus('\u274C ' + e.message))
       .finally(() => {
@@ -404,7 +429,21 @@ export default function App() {
           {tokens ? (
             <>
               <div className="oauth-status">{oauthStatus || '\u2705 Connected'}</div>
-              <button onClick={handleCheckCar} disabled={loading}>{loading ? 'Checking...' : 'Check My Car'}</button>
+              {vehicles && vehicles.length === 0 && (
+                <p style={{fontSize: '0.85rem', color: '#8b949e', marginBottom: 16}}>No vehicles registered on this Tesla account. Add a vehicle in the Tesla app and try again.</p>
+              )}
+              {vehicles && vehicles.length > 1 && (
+                <div style={{marginBottom: 16}}>
+                  <label>Select Vehicle</label>
+                  <select value={selectedVehicle || ''} onChange={e => setSelectedVehicle(e.target.value)} style={{width: '100%', padding: '10px 12px', background: '#161b22', border: '1px solid #30363d', borderRadius: 6, color: '#c9d1d9', fontSize: '0.9rem'}}>
+                    <option value="" disabled>Choose a vehicle...</option>
+                    {vehicles.map(v => <option key={v.id} value={v.id}>{v.name} ({v.state})</option>)}
+                  </select>
+                </div>
+              )}
+              {vehicles && vehicles.length > 0 && (
+                <button onClick={() => handleCheckCar(selectedVehicle)} disabled={loading || (vehicles.length > 1 && !selectedVehicle)}>{loading ? 'Checking...' : 'Check My Car'}</button>
+              )}
               <button className="disconnect-btn" onClick={logout}>Disconnect</button>
             </>
           ) : (
@@ -432,6 +471,7 @@ export default function App() {
                 <ol>
                   <li>Go to <a href="https://developer.tesla.com/dashboard" target="_blank" rel="noopener">developer.tesla.com/dashboard</a></li>
                   <li>Create an application (or use an existing one)</li>
+                  <li>Enable scopes: <strong>Vehicle Information</strong> and <strong>Vehicle Location</strong></li>
                   <li>Copy your <strong>Client ID</strong> and <strong>Client Secret</strong></li>
                   <li>Add <code>{redirectUri}</code> as an allowed Redirect URI in your app settings</li>
                 </ol>
