@@ -19,6 +19,9 @@ app.use(express.json());
 const TESLA_APP_CLIENT_ID = process.env.TESLA_CLIENT_ID || '';
 const TESLA_APP_CLIENT_SECRET = process.env.TESLA_CLIENT_SECRET || '';
 const TESLA_APP_REDIRECT_URI = process.env.TESLA_REDIRECT_URI || '';
+const SLACK_CLIENT_ID = process.env.SLACK_CLIENT_ID || '';
+const SLACK_CLIENT_SECRET = process.env.SLACK_CLIENT_SECRET || '';
+const SLACK_REDIRECT_URI = process.env.SLACK_REDIRECT_URI || '';
 
 const TESLA_BASE = 'https://fleet-api.prd.na.vn.cloud.tesla.com';
 const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
@@ -391,6 +394,50 @@ app.post('/api/oauth/refresh', wrap(async (req, res) => {
   const { client_id, refresh_token } = req.body;
   const data = await teslaTokenExchange({ grant_type: 'refresh_token', client_id, refresh_token });
   res.json({ access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in });
+}));
+
+// "Sign in with Slack" — OIDC flow so users can subscribe to
+// notifications without hunting for their member id.
+app.post('/api/slack/oauth/start', (req, res) => {
+  if (!SLACK_CLIENT_ID) return res.status(500).json({ detail: 'Slack OAuth not configured' });
+  const state = randomBytes(32).toString('base64url');
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: SLACK_CLIENT_ID,
+    scope: 'openid profile',
+    redirect_uri: SLACK_REDIRECT_URI,
+    state,
+  });
+  res.json({ url: `https://slack.com/openid/connect/authorize?${params}`, state });
+});
+
+app.post('/api/slack/oauth/callback', wrap(async (req, res) => {
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ detail: 'code required' });
+  const tokenRes = await fetchWithTimeout('https://slack.com/api/openid.connect.token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: SLACK_CLIENT_ID,
+      client_secret: SLACK_CLIENT_SECRET,
+      redirect_uri: SLACK_REDIRECT_URI,
+      code,
+    }).toString(),
+  });
+  const data = await tokenRes.json();
+  if (!data.ok) throw new Error(data.error || 'Slack token exchange failed');
+  const userRes = await fetchWithTimeout('https://slack.com/api/openid.connect.userInfo', {
+    headers: { Authorization: `Bearer ${data.access_token}` },
+  });
+  const userData = await userRes.json();
+  if (!userData.ok) throw new Error(userData.error || 'Slack userInfo failed');
+  res.json({
+    slack_user_id: userData['https://slack.com/user_id'],
+    team_id: userData['https://slack.com/team_id'],
+    email: userData.email,
+    name: userData.name,
+  });
 }));
 
 // Daily-notification subscription endpoints. Stores the user's Tesla
