@@ -406,16 +406,17 @@ export default function App() {
         if (vlist.length === 0) {
           setOauthStatus('\u2705 Connected — no vehicles on this account');
         } else if (vlist.length === 1) {
-          // Same battery-protection rule as the auto-check effect:
-          // post-OAuth auto-runs the check only if the single car is
-          // already online. If asleep, show a hint + leave the user
-          // to click "Check My Car" to opt into the wake.
-          if (vlist[0].state === 'online') {
-            setOauthStatus('\u2705 Connected! Checking your car...');
-            await checkVehicle(data.access_token, vlist[0].id);
-          } else {
-            setOauthStatus('\u2705 Connected \u2014 your car is asleep. Click "Check My Car" to wake it.');
-          }
+          // Just-completed OAuth: user opted in by going through the
+          // login UX, so it's reasonable to wake the car here even if
+          // asleep. The other auto-check (tokens-loaded effect) stays
+          // gated on state==online so subsequent passive page loads
+          // don't drain the battery.
+          if (vlist[0].state !== 'online') setWaking(true);
+          setOauthStatus(vlist[0].state === 'online'
+            ? '\u2705 Connected! Checking your car...'
+            : '\u2705 Connected \u2014 waking your car (up to 60s)...');
+          try { await checkVehicle(data.access_token, vlist[0].id); }
+          finally { setWaking(false); }
         } else {
           setOauthStatus(`\u2705 Connected — ${vlist.length} vehicles found. Select one to check.`);
         }
