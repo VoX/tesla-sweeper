@@ -167,7 +167,16 @@ export default function App() {
           const vid = selectedVehicle || (vlist.length === 1 ? vlist[0].id : null);
           if (vid && !autoCheckedRef.current) {
             autoCheckedRef.current = true;
-            checkVehicle(tokens.access_token, vid).catch(() => {});
+            // Auto-check fires on every page load while logged in.
+            // ONLY auto-check if the car is currently online —
+            // otherwise we'd silently wake the car every time the
+            // user opened the page, draining battery overnight.
+            // The user can still explicitly click "Check My Car"
+            // to force a wake-then-check.
+            const v = vlist.find(x => x.id === vid);
+            if (v?.state === 'online') {
+              checkVehicle(tokens.access_token, vid).catch(() => {});
+            }
           }
         }).catch(() => {});
       }
@@ -397,8 +406,16 @@ export default function App() {
         if (vlist.length === 0) {
           setOauthStatus('\u2705 Connected — no vehicles on this account');
         } else if (vlist.length === 1) {
-          setOauthStatus('\u2705 Connected! Checking your car...');
-          await checkVehicle(data.access_token, vlist[0].id);
+          // Same battery-protection rule as the auto-check effect:
+          // post-OAuth auto-runs the check only if the single car is
+          // already online. If asleep, show a hint + leave the user
+          // to click "Check My Car" to opt into the wake.
+          if (vlist[0].state === 'online') {
+            setOauthStatus('\u2705 Connected! Checking your car...');
+            await checkVehicle(data.access_token, vlist[0].id);
+          } else {
+            setOauthStatus('\u2705 Connected \u2014 your car is asleep. Click "Check My Car" to wake it.');
+          }
         } else {
           setOauthStatus(`\u2705 Connected — ${vlist.length} vehicles found. Select one to check.`);
         }
