@@ -71,29 +71,6 @@ function publicSub(s) {
   return { id: s.id, slack_user_id: s.slack_user_id, vehicle_name: s.vehicle_name, vehicle_id: s.vehicle_id, oauth_mode: s.oauth_mode, created_at: s.created_at, last_check_at: s.last_check_at };
 }
 
-// Pairing tokens for subscribe-via-DM. tinyclaw mints one when the
-// user DMs "subscribe my tesla", embeds it in a magic link; the web
-// page redeems it for the bound slack_user_id so the user never has
-// to type their own id. 30 min TTL — long enough to do Tesla OAuth.
-const PAIR_TOKEN_TTL_MS = 30 * 60 * 1000;
-const pairTokens = new Map();
-function issuePairToken(slack_user_id) {
-  const token = randomBytes(24).toString('base64url');
-  const expires_at = Date.now() + PAIR_TOKEN_TTL_MS;
-  pairTokens.set(token, { slack_user_id, expires_at });
-  return { token, expires_at };
-}
-function lookupPairToken(token) {
-  const e = pairTokens.get(token);
-  if (!e) return null;
-  if (Date.now() > e.expires_at) { pairTokens.delete(token); return null; }
-  return e;
-}
-setInterval(() => {
-  const now = Date.now();
-  for (const [t, e] of pairTokens) if (now > e.expires_at) pairTokens.delete(t);
-}, 60_000).unref();
-
 // Wake an asleep vehicle and poll until it reports online. Returns
 // true on success, false on timeout. Caller should retry vehicle_data
 // only after this returns true. The 60s ceiling matches typical
@@ -420,17 +397,9 @@ app.post('/api/oauth/refresh', wrap(async (req, res) => {
 // refresh_token server-side so a 12pm ET cron can wake the car, check
 // the sweeping schedule, and DM via Slack on T-3/T-2/T-1.
 app.post('/api/notifications/enable', wrap(async (req, res) => {
-  const { refresh_token, oauth_mode = 'app', client_id, vehicle_id, vehicle_name, pair_token } = req.body;
-  let { slack_user_id } = req.body;
-  // pair_token wins — server-resolved id beats client-provided string
-  // since we trust the bot's mint endpoint over the user's input.
-  if (pair_token) {
-    const entry = lookupPairToken(pair_token);
-    if (!entry) return res.status(400).json({ detail: 'pair_token invalid or expired' });
-    slack_user_id = entry.slack_user_id;
-  }
+  const { refresh_token, oauth_mode = 'app', client_id, vehicle_id, vehicle_name, slack_user_id } = req.body;
   if (!refresh_token || !slack_user_id || !vehicle_id) {
-    return res.status(400).json({ detail: 'refresh_token, slack_user_id (or pair_token), and vehicle_id are required' });
+    return res.status(400).json({ detail: 'refresh_token, slack_user_id, and vehicle_id are required' });
   }
   if (oauth_mode === 'custom' && !client_id) {
     return res.status(400).json({ detail: 'custom oauth requires client_id' });
@@ -462,35 +431,8 @@ app.post('/api/notifications/enable', wrap(async (req, res) => {
   };
   filtered.push(sub);
   saveSubs(filtered);
-  if (pair_token) pairTokens.delete(pair_token);
-  res.json({ enabled: true, id: sub.id, slack_user_id });
+  res.json({ enabled: true, id: sub.id });
 }));
-
-// Mint a pairing token bound to a slack_user_id. Bearer-auth via the
-// same NOTIFICATIONS_RUN_TOKEN as the cron path — only tinyclaw (or
-// whoever knows the secret) can issue these.
-app.post('/api/notifications/pair', wrap(async (req, res) => {
-  const auth = req.get('authorization') || '';
-  if (!NOTIFICATIONS_RUN_TOKEN || auth !== `Bearer ${NOTIFICATIONS_RUN_TOKEN}`) {
-    return res.status(401).json({ detail: 'Unauthorized' });
-  }
-  const { slack_user_id } = req.body;
-  if (!slack_user_id || !SLACK_USER_ID_RE.test(slack_user_id)) {
-    return res.status(400).json({ detail: 'valid slack_user_id required' });
-  }
-  res.json(issuePairToken(slack_user_id));
-}));
-
-// Public: resolve a pair token. The token IS the auth — anyone with
-// it learns the bound slack_user_id. Used by the web page after a
-// magic-link click to pre-fill the subscribe panel.
-app.get('/api/notifications/pair-info', (req, res) => {
-  const { token } = req.query;
-  if (!token) return res.status(400).json({ detail: 'token required' });
-  const e = lookupPairToken(token);
-  if (!e) return res.status(404).json({ detail: 'token not found or expired' });
-  res.json({ slack_user_id: e.slack_user_id, expires_at: e.expires_at });
-});
 
 app.post('/api/notifications/disable', wrap(async (req, res) => {
   const { id, slack_user_id } = req.body;
