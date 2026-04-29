@@ -154,7 +154,7 @@ function parseSlackInput(value) {
   return m ? m[1] : v;
 }
 
-function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis, notifLoading, notifError, onEnable, onDisable }) {
+function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis, notifLoading, notifError, onSlackSignIn, onEnable, onDisable }) {
   return (
     <div className="card" style={{ marginTop: 16 }}>
       <h3>{'🔔'} Daily Slack Pings</h3>
@@ -173,18 +173,24 @@ function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis, notif
         </>
       ) : (
         <>
-          <label htmlFor="slack-user-id">Slack User ID or Profile URL</label>
-          <input
-            id="slack-user-id"
-            placeholder="U060NLFUM or paste your slack profile URL"
-            value={slackUserId}
-            onChange={e => setSlackUserId(parseSlackInput(e.target.value))}
-          />
-          <p style={{ fontSize: '0.75rem', color: '#8b949e', marginTop: -8, marginBottom: 12 }}>
-            Paste your slack profile URL, or copy your member ID (Slack profile → ⋮ → Copy member ID).
-          </p>
+          <button onClick={onSlackSignIn} disabled={notifLoading} style={{ marginBottom: 12 }}>
+            {notifLoading ? 'Connecting to Slack...' : 'Sign in with Slack'}
+          </button>
+          <details style={{ marginBottom: 12 }}>
+            <summary style={{ fontSize: '0.8rem', color: '#8b949e', cursor: 'pointer' }}>or paste your slack user id manually</summary>
+            <label htmlFor="slack-user-id" style={{ marginTop: 8, display: 'block' }}>Slack User ID or Profile URL</label>
+            <input
+              id="slack-user-id"
+              placeholder="U060NLFUM or paste your slack profile URL"
+              value={slackUserId}
+              onChange={e => setSlackUserId(parseSlackInput(e.target.value))}
+            />
+            <p style={{ fontSize: '0.75rem', color: '#8b949e', marginTop: -8, marginBottom: 12 }}>
+              Find via Slack profile → ⋮ → Copy member ID.
+            </p>
+          </details>
           <button onClick={onEnable} disabled={notifLoading || !slackUserId}>
-            {notifLoading ? 'Enabling...' : 'Enable Daily Notifications'}
+            {notifLoading ? 'Enabling...' : `Enable Daily Notifications${slackUserId ? ` for ${slackUserId}` : ''}`}
           </button>
         </>
       )}
@@ -516,6 +522,19 @@ export default function App() {
     }
   };
 
+  const handleSlackSignIn = async () => {
+    setNotifError('');
+    setNotifLoading(true);
+    try {
+      const data = await post('slack/oauth/start', {});
+      sessionStorage.setItem('slack_oauth_state', data.state);
+      window.location.href = data.url;
+    } catch (e) {
+      setNotifError('Slack sign-in failed to start: ' + e.message);
+      setNotifLoading(false);
+    }
+  };
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const code = params.get('code');
@@ -524,8 +543,24 @@ export default function App() {
 
     window.history.replaceState({}, '', window.location.pathname);
 
-    const savedState = sessionStorage.getItem('tesla_oauth_state');
-    if (!state || !savedState || state !== savedState) {
+    const slackState = sessionStorage.getItem('slack_oauth_state');
+    const teslaState = sessionStorage.getItem('tesla_oauth_state');
+
+    if (slackState && state === slackState) {
+      sessionStorage.removeItem('slack_oauth_state');
+      post('slack/oauth/callback', { code })
+        .then(data => {
+          if (!data.slack_user_id) throw new Error('Slack returned no user_id');
+          setSlackUserId(data.slack_user_id);
+          setNotifError('');
+          setOauthStatus(`\u{1F510} Signed in as ${data.name || data.slack_user_id} — click Enable Daily Notifications to subscribe.`);
+        })
+        .catch(e => setNotifError('Slack sign-in failed: ' + e.message))
+        .finally(() => setNotifLoading(false));
+      return;
+    }
+
+    if (!teslaState || state !== teslaState) {
       setError('OAuth state mismatch — possible CSRF. Try again.');
       return;
     }
@@ -650,6 +685,7 @@ export default function App() {
                   enabledForThis={subscriptions?.find(s => s.vehicle_id === (selectedVehicle || vehicles[0].id))}
                   notifLoading={notifLoading}
                   notifError={notifError}
+                  onSlackSignIn={handleSlackSignIn}
                   onEnable={enableNotifications}
                   onDisable={disableNotifications}
                 />
