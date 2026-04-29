@@ -22,6 +22,7 @@ const TESLA_APP_REDIRECT_URI = process.env.TESLA_REDIRECT_URI || '';
 const SLACK_CLIENT_ID = process.env.SLACK_CLIENT_ID || '';
 const SLACK_CLIENT_SECRET = process.env.SLACK_CLIENT_SECRET || '';
 const SLACK_REDIRECT_URI = process.env.SLACK_REDIRECT_URI || '';
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || '';
 
 const TESLA_BASE = 'https://fleet-api.prd.na.vn.cloud.tesla.com';
 const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
@@ -120,6 +121,24 @@ async function teslaTokenExchange(params) {
 function buildRefreshParams(oauth_mode, refresh_token, client_id) {
   const id = oauth_mode === 'app' ? TESLA_APP_CLIENT_ID : client_id;
   return { grant_type: 'refresh_token', client_id: id, refresh_token };
+}
+
+// Post a Slack DM via chat.postMessage. Slack auto-resolves a U-id
+// to a 1:1 IM channel. Returns {ok, error?} so callers can surface
+// failure to the user without throwing.
+async function postSlackDM(slack_user_id, text) {
+  if (!SLACK_BOT_TOKEN) return { ok: false, error: 'SLACK_BOT_TOKEN not configured' };
+  const res = await fetchWithTimeout('https://slack.com/api/chat.postMessage', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+      'Content-Type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify({ channel: slack_user_id, text }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!data.ok) console.error('[slack-dm] postMessage failed:', data.error);
+  return { ok: !!data.ok, error: data.error };
 }
 
 // Fetch vehicle_data with location + charge_state. Wakes the car if it
@@ -481,7 +500,14 @@ app.post('/api/notifications/enable', wrap(async (req, res) => {
   };
   filtered.push(sub);
   saveSubs(filtered);
-  res.json({ enabled: true, id: sub.id });
+  // Best-effort confirmation DM. Failure here doesn't undo the sub —
+  // the user just won't see the confirmation. Surface the error in
+  // the response so the SPA can hint at it.
+  const dm = await postSlackDM(
+    slack_user_id,
+    `:car: Tesla sweeper notifications enabled for *${sub.vehicle_name}*. I'll DM you 1, 2, and 3 days before each sweep at noon ET. Disable anytime at https://claw.bitvox.me/sweeper/.`
+  );
+  res.json({ enabled: true, id: sub.id, test_dm_ok: dm.ok, test_dm_error: dm.error || null });
 }));
 
 app.post('/api/notifications/disable', wrap(async (req, res) => {

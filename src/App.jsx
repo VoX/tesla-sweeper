@@ -336,7 +336,12 @@ export default function App() {
       });
       await fetchSubscriptions(slackUserId);
       setNotifError('');
-      setOauthStatus(`\u{1F514} Daily slack pings enabled for ${veh?.name || 'this vehicle'}`);
+      const dmHint = data.test_dm_ok
+        ? ' (check slack for the test ping)'
+        : data.test_dm_error
+          ? ` — couldn't send test DM (${data.test_dm_error}), sub still active`
+          : '';
+      setOauthStatus(`\u{1F514} Daily slack pings enabled for ${veh?.name || 'this vehicle'}${dmHint}`);
     } catch (e) {
       setNotifError(e.message);
     } finally {
