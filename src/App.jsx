@@ -144,6 +144,16 @@ function clientToday() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// Accept either a raw slack user id (U060NLFUM) or a pasted slack URL
+// (https://app.slack.com/team/U..., /user_profile/U..., slack://user?id=U...)
+// and return the extracted U-id. Pass-through if input doesn't look URL-y.
+function parseSlackInput(value) {
+  const v = value.trim();
+  if (!v.includes('/') && !v.includes('?')) return v;
+  const m = v.match(/(?:\/(?:team|user_profile)\/|[?&]id=)(U[A-Z0-9]+)/);
+  return m ? m[1] : v;
+}
+
 function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis, notifLoading, notifError, onEnable, onDisable }) {
   return (
     <div className="card" style={{ marginTop: 16 }}>
@@ -163,15 +173,15 @@ function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis, notif
         </>
       ) : (
         <>
-          <label htmlFor="slack-user-id">Slack User ID</label>
+          <label htmlFor="slack-user-id">Slack User ID or Profile URL</label>
           <input
             id="slack-user-id"
-            placeholder="U060NLFUM"
+            placeholder="U060NLFUM or paste your slack profile URL"
             value={slackUserId}
-            onChange={e => setSlackUserId(e.target.value.trim())}
+            onChange={e => setSlackUserId(parseSlackInput(e.target.value))}
           />
           <p style={{ fontSize: '0.75rem', color: '#8b949e', marginTop: -8, marginBottom: 12 }}>
-            In Slack: profile → ⋮ menu → Copy member ID
+            Paste your slack profile URL, or copy your member ID (Slack profile → ⋮ → Copy member ID).
           </p>
           <button onClick={onEnable} disabled={notifLoading || !slackUserId}>
             {notifLoading ? 'Enabling...' : 'Enable Daily Notifications'}
