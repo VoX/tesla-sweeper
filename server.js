@@ -48,6 +48,32 @@ async function nominatimFetch(url, options) {
 
 const TESLA_TOKEN_URL = 'https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token';
 
+// Wake an asleep vehicle and poll until it reports online. Returns
+// true on success, false on timeout. Caller should retry vehicle_data
+// only after this returns true. The 60s ceiling matches typical
+// Tesla wake latency (model 3 ~30s, model s ~50s); cars deeper in
+// hibernation can take longer but the frontend's UX is degraded
+// past a minute and it's better to fail loud than block forever.
+async function teslaWakeAndPoll(headers, vid) {
+  const wakeRes = await fetchWithTimeout(`${TESLA_BASE}/api/1/vehicles/${vid}/wake_up`, {
+    method: 'POST',
+    headers,
+  });
+  if (!wakeRes.ok) {
+    console.error(`[wake] wake_up returned ${wakeRes.status}`);
+    return false;
+  }
+  for (let i = 0; i < 12; i++) {
+    await new Promise(r => setTimeout(r, 5000));
+    const stateRes = await fetchWithTimeout(`${TESLA_BASE}/api/1/vehicles/${vid}`, { headers });
+    if (!stateRes.ok) continue;
+    const v = (await stateRes.json()).response;
+    console.log(`[wake] poll ${i + 1}/12 — state=${v?.state}`);
+    if (v?.state === 'online') return true;
+  }
+  return false;
+}
+
 async function teslaTokenExchange(params) {
   const r = await fetchWithTimeout(TESLA_TOKEN_URL, {
     method: 'POST',
@@ -106,11 +132,26 @@ app.post('/api/check', wrap(async (req, res) => {
   }
 
   console.log(`[check] Getting location for vehicle ${vid}`);
-  const locRes = await fetchWithTimeout(
+  let locRes = await fetchWithTimeout(
     `${TESLA_BASE}/api/1/vehicles/${vid}/vehicle_data?endpoints=location_data`,
     { headers }
   );
-  if (locRes.status === 408) return res.status(408).json({ detail: 'Vehicle is asleep. Open the Tesla app to wake it, then retry.' });
+  // 408 = vehicle asleep / unreachable. Send the wake command and poll
+  // /vehicles/{id} until state==online (up to 60s), then retry data.
+  // Was previously asking the user to open the Tesla app manually —
+  // app has the wake permission already, no reason to bounce them.
+  if (locRes.status === 408) {
+    console.log(`[check] Vehicle ${vid} is asleep — sending wake_up`);
+    const woke = await teslaWakeAndPoll(headers, vid);
+    if (!woke) {
+      return res.status(504).json({ detail: 'Vehicle did not wake within 60s. Try again, or open the Tesla app to wake it manually.' });
+    }
+    console.log(`[check] Vehicle ${vid} is awake — retrying vehicle_data`);
+    locRes = await fetchWithTimeout(
+      `${TESLA_BASE}/api/1/vehicles/${vid}/vehicle_data?endpoints=location_data`,
+      { headers }
+    );
+  }
   if (!locRes.ok) {
     console.error(`[check] Vehicle data error: ${locRes.status}`);
     return res.status(locRes.status).json({ detail: 'Failed to get vehicle data' });

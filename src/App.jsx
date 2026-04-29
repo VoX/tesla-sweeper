@@ -128,6 +128,12 @@ export default function App() {
     return new URLSearchParams(window.location.search).get('address') ? 'address' : 'app';
   });
   const [loading, setLoading] = useState(false);
+  // Sub-message shown under the loading state. Used to surface
+  // "your car is asleep, waking it" after the first few seconds —
+  // server holds the request up to 60s while polling Tesla's wake
+  // endpoint, and a static "Checking..." button label is alarming
+  // past ~5s.
+  const [waking, setWaking] = useState(false);
   const [error, setError] = useState('');
   const [sweepData, setSweepData] = useState(null);
   const [vehicleInfo, setVehicleInfo] = useState(null);
@@ -302,9 +308,17 @@ export default function App() {
     if (!tokens?.access_token) return;
     reset();
     setLoading(true);
+    // 7s after start, assume the car was asleep and the server is in
+    // its wake-and-poll loop. Switch the UI to "Waking..." so the user
+    // knows the next ~30-50s of latency is expected, not a hang.
+    const wakeHint = setTimeout(() => setWaking(true), 7000);
     try { await checkVehicle(tokens.access_token, vid || selectedVehicle); }
     catch (e) { setError(e.message); }
-    finally { setLoading(false); }
+    finally {
+      clearTimeout(wakeHint);
+      setWaking(false);
+      setLoading(false);
+    }
   };
 
   const handleOAuthStart = async () => {
@@ -456,7 +470,7 @@ export default function App() {
                 </div>
               )}
               {vehicles && vehicles.length > 0 && (
-                <button onClick={() => handleCheckCar(selectedVehicle)} disabled={loading || (vehicles.length > 1 && !selectedVehicle)}>{loading ? 'Checking...' : 'Check My Car'}</button>
+                <button onClick={() => handleCheckCar(selectedVehicle)} disabled={loading || (vehicles.length > 1 && !selectedVehicle)}>{loading ? (waking ? 'Waking your car... (up to 60s)' : 'Checking...') : 'Check My Car'}</button>
               )}
               <button className="disconnect-btn" onClick={logout}>Disconnect</button>
             </>
@@ -475,7 +489,7 @@ export default function App() {
           {tokens ? (
             <>
               <div className="oauth-status">{oauthStatus || '\u2705 Connected'}</div>
-              <button onClick={handleCheckCar} disabled={loading}>{loading ? 'Checking...' : 'Check My Car'}</button>
+              <button onClick={handleCheckCar} disabled={loading}>{loading ? (waking ? 'Waking your car... (up to 60s)' : 'Checking...') : 'Check My Car'}</button>
               <button className="disconnect-btn" onClick={logout}>Disconnect</button>
             </>
           ) : (
