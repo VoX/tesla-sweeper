@@ -2,7 +2,7 @@ import express from 'express';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -26,6 +26,8 @@ const RECOLLECT_BASE = 'https://api.recollect.net/api';
 const RECOLLECT_SERVICE = 349;
 const UA = 'TeslaSweeper/1.0';
 const FETCH_TIMEOUT = 12000;
+const VEHICLE_DATA_QS = 'endpoints=location_data%3Bcharge_state';
+const SLACK_USER_ID_RE = /^U[A-Z0-9]+$/;
 
 const wrap = (fn) => (req, res) => fn(req, res).catch(e => {
   console.error(`${req.path}:`, e.message);
@@ -47,6 +49,27 @@ async function nominatimFetch(url, options) {
 }
 
 const TESLA_TOKEN_URL = 'https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token';
+
+// Subscriptions for daily sweep notifications. File holds Tesla
+// refresh_tokens — mode 0600, never logged. Atomic write via temp+rename
+// so a crash mid-write doesn't truncate the store.
+const SUBS_DIR = join(__dirname, 'data');
+const SUBS_FILE = join(SUBS_DIR, 'subscriptions.json');
+const NOTIFICATIONS_RUN_TOKEN = process.env.NOTIFICATIONS_RUN_TOKEN || '';
+mkdirSync(SUBS_DIR, { recursive: true, mode: 0o700 });
+function loadSubs() {
+  try {
+    return JSON.parse(readFileSync(SUBS_FILE, 'utf8')).subscriptions || [];
+  } catch { return []; }
+}
+function saveSubs(subs) {
+  const tmp = SUBS_FILE + '.tmp';
+  writeFileSync(tmp, JSON.stringify({ subscriptions: subs }, null, 2), { mode: 0o600 });
+  renameSync(tmp, SUBS_FILE);
+}
+function publicSub(s) {
+  return { id: s.id, slack_user_id: s.slack_user_id, vehicle_name: s.vehicle_name, vehicle_id: s.vehicle_id, oauth_mode: s.oauth_mode, created_at: s.created_at, last_check_at: s.last_check_at };
+}
 
 // Wake an asleep vehicle and poll until it reports online. Returns
 // true on success, false on timeout. Caller should retry vehicle_data
@@ -86,6 +109,153 @@ async function teslaTokenExchange(params) {
     throw new Error(body.error_description || body.error || 'Token exchange failed');
   }
   return r.json();
+}
+
+function buildRefreshParams(oauth_mode, refresh_token, client_id) {
+  const id = oauth_mode === 'app' ? TESLA_APP_CLIENT_ID : client_id;
+  return { grant_type: 'refresh_token', client_id: id, refresh_token };
+}
+
+// Fetch vehicle_data with location + charge_state. Wakes the car if it
+// returns 408 (asleep) and retries once. Throws on anything that
+// doesn't parse to a usable response.
+async function fetchVehicleData(headers, vid) {
+  const url = `${TESLA_BASE}/api/1/vehicles/${vid}/vehicle_data?${VEHICLE_DATA_QS}`;
+  let res = await fetchWithTimeout(url, { headers });
+  if (res.status === 408) {
+    console.log(`[wake] vehicle ${vid} asleep — sending wake_up`);
+    if (!await teslaWakeAndPoll(headers, vid)) throw new Error('Vehicle did not wake within 60s');
+    res = await fetchWithTimeout(url, { headers });
+  }
+  if (!res.ok) throw new Error(`vehicle_data ${res.status}`);
+  return res.json();
+}
+
+async function reverseGeocodeLocation(lat, lng) {
+  const params = new URLSearchParams({ format: 'jsonv2', lat, lon: lng, zoom: 18, addressdetails: 1 });
+  const res = await nominatimFetch(`${NOMINATIM_BASE}/reverse?${params}`, { headers: { 'User-Agent': UA } });
+  if (!res.ok) throw new Error(`Nominatim ${res.status}`);
+  const data = await res.json();
+  const a = data.address || {};
+  return {
+    street: a.road || '',
+    house_number: a.house_number || '',
+    city: a.city || a.town || a.village || '',
+    state: a.state || '',
+    display_name: data.display_name || '',
+  };
+}
+
+async function runSweepCheck({ address, today_date, past_noon = false }) {
+  const todayStr = today_date || new Date().toISOString().slice(0, 10);
+  const today = new Date(todayStr + 'T12:00:00Z');
+  const future = new Date(today); future.setDate(future.getDate() + 30);
+  const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowStr = tomorrow.toISOString().slice(0, 10);
+
+  const suggestRes = await fetchWithTimeout(
+    `${RECOLLECT_BASE}/areas/Somerville/services/${RECOLLECT_SERVICE}/address-suggest?${new URLSearchParams({ q: address, locale: 'en-US' })}`,
+    { headers: { 'User-Agent': UA } }
+  );
+  if (!suggestRes.ok) throw new Error(`Recollect address suggest ${suggestRes.status}`);
+  const suggestions = await suggestRes.json();
+  if (!suggestions.length) return { found: false, message: 'Address not found in Somerville sweeping database' };
+  const place = suggestions[0];
+
+  const eventsRes = await fetchWithTimeout(
+    `${RECOLLECT_BASE}/places/${place.place_id}/services/${RECOLLECT_SERVICE}/events?${new URLSearchParams({ after: todayStr, before: future.toISOString().slice(0, 10), locale: 'en-US' })}`,
+    { headers: { 'User-Agent': UA } }
+  );
+  if (!eventsRes.ok) throw new Error(`Recollect events ${eventsRes.status}`);
+  const eventsData = await eventsRes.json();
+  const rawEvents = Array.isArray(eventsData) ? eventsData : (eventsData.events || []);
+
+  const sweepEvents = [];
+  for (const event of rawEvents) {
+    if (!event.flags || !event.day) continue;
+    for (const flag of event.flags) {
+      const name = flag.name || '';
+      if (!name.toLowerCase().includes('sweeping')) continue;
+      const m = name.match(/(\d{1,2})(AM|PM)_(\d{1,2})(AM|PM)/);
+      sweepEvents.push({
+        date: event.day,
+        type: name,
+        side: name.includes('EVEN') ? 'even' : name.includes('ODD') ? 'odd' : 'both',
+        time: m ? `${m[1]}:00 ${m[2]} - ${m[3]}:00 ${m[4]}` : name,
+      });
+    }
+  }
+
+  const houseMatch = address.trim().match(/^(\d+)/);
+  const houseNum = houseMatch ? parseInt(houseMatch[1]) : null;
+  const carSide = houseNum ? (houseNum % 2 === 0 ? 'even' : 'odd') : null;
+
+  const sweepingToday = sweepEvents.filter(e => e.date === todayStr);
+  const sweepingTomorrow = sweepEvents.filter(e => e.date === tomorrowStr);
+  const daysUntilNext = sweepEvents.length
+    ? Math.max(0, Math.ceil((new Date(sweepEvents[0].date) - new Date(todayStr)) / 86400000))
+    : null;
+
+  const sideLabel = (events) => [...new Set(events.map(e => e.side + ' side'))].join(', ');
+  const carMatches = (events) => !carSide || events.some(e => e.side === carSide);
+
+  let status, title, message;
+  if (sweepingToday.length) {
+    const sides = sideLabel(sweepingToday);
+    if (past_noon) {
+      status = 'info'; title = 'Sweeping Done for Today';
+      message = `Sweeping was scheduled today (${sides}, 8AM-12PM). It's past noon — you're clear.`;
+    } else if (carMatches(sweepingToday)) {
+      status = 'danger'; title = 'MOVE YOUR CAR';
+      message = `Sweeping TODAY on YOUR side (${sides}, 8AM-12PM). $50 fine!`;
+    } else {
+      status = 'warning'; title = 'Sweeping Today — Other Side';
+      message = `Sweeping today but on the ${sides} (you're on the ${carSide} side at #${houseNum}).`;
+    }
+  } else if (sweepingTomorrow.length) {
+    const sides = sideLabel(sweepingTomorrow);
+    if (carMatches(sweepingTomorrow)) {
+      status = 'warning'; title = 'Sweeping Tomorrow — YOUR Side';
+      message = `Sweeping TOMORROW on your side (${sides}, 8AM-12PM). Move tonight.`;
+    } else {
+      status = 'info'; title = 'Sweeping Tomorrow — Other Side';
+      message = `Sweeping tomorrow but on the ${sides}. You're on the ${carSide} side at #${houseNum}.`;
+    }
+  } else if (sweepEvents.length) {
+    const e = sweepEvents[0];
+    status = 'safe'; title = "You're Good";
+    message = `Next sweep in ${daysUntilNext} day${daysUntilNext !== 1 ? 's' : ''}: ${e.date} (${e.side} side, ${e.time})`;
+  } else {
+    status = 'safe'; title = 'No Sweeping Scheduled';
+    message = 'No sweeping events found in the next 30 days.';
+  }
+
+  // Forward-geocode the matched address for the map. Best-effort —
+  // sweep result still returns even if the geocode fails.
+  let latitude = null, longitude = null;
+  try {
+    const geoRes = await nominatimFetch(
+      `${NOMINATIM_BASE}/search?${new URLSearchParams({ q: (place.name || address) + ', Somerville, MA', format: 'jsonv2', limit: 1 })}`,
+      { headers: { 'User-Agent': UA } }
+    );
+    if (geoRes.ok) {
+      const results = await geoRes.json();
+      if (results.length) { latitude = parseFloat(results[0].lat); longitude = parseFloat(results[0].lon); }
+    }
+  } catch {}
+
+  return {
+    found: true,
+    place_name: place.name || address,
+    place_id: place.place_id,
+    status, title, message,
+    sweep_events: sweepEvents,
+    car_side: carSide,
+    house_num: houseNum,
+    days_until_next: daysUntilNext,
+    latitude,
+    longitude,
+  };
 }
 
 // List vehicles on account
@@ -132,180 +302,27 @@ app.post('/api/check', wrap(async (req, res) => {
   }
 
   console.log(`[check] Getting location for vehicle ${vid}`);
-  let locRes = await fetchWithTimeout(
-    `${TESLA_BASE}/api/1/vehicles/${vid}/vehicle_data?endpoints=location_data`,
-    { headers }
-  );
-  // 408 = vehicle asleep / unreachable. Send the wake command and poll
-  // /vehicles/{id} until state==online (up to 60s), then retry data.
-  // Was previously asking the user to open the Tesla app manually —
-  // app has the wake permission already, no reason to bounce them.
-  if (locRes.status === 408) {
-    console.log(`[check] Vehicle ${vid} is asleep — sending wake_up`);
-    const woke = await teslaWakeAndPoll(headers, vid);
-    if (!woke) {
-      return res.status(504).json({ detail: 'Vehicle did not wake within 60s. Try again, or open the Tesla app to wake it manually.' });
-    }
-    console.log(`[check] Vehicle ${vid} is awake — retrying vehicle_data`);
-    locRes = await fetchWithTimeout(
-      `${TESLA_BASE}/api/1/vehicles/${vid}/vehicle_data?endpoints=location_data`,
-      { headers }
-    );
-  }
-  if (!locRes.ok) {
-    console.error(`[check] Vehicle data error: ${locRes.status}`);
-    return res.status(locRes.status).json({ detail: 'Failed to get vehicle data' });
-  }
-
-  const locData = await locRes.json();
-  const driveState = locData.response?.drive_state || {};
-  const { latitude, longitude } = driveState;
+  const locData = await fetchVehicleData(headers, vid);
+  const { latitude, longitude } = locData.response?.drive_state || {};
   console.log(`[check] Location: ${latitude}, ${longitude}`);
   if (latitude == null || longitude == null) return res.status(404).json({ detail: 'Could not determine vehicle location' });
-
-  const vehicleName = locData.response?.display_name || locData.response?.vehicle_config?.car_type || 'Unknown';
-  res.json({ vehicle_name: vehicleName, latitude, longitude });
+  res.json({
+    vehicle_name: locData.response?.display_name || locData.response?.vehicle_config?.car_type || 'Unknown',
+    latitude,
+    longitude,
+    battery_level: locData.response?.charge_state?.battery_level,
+  });
 }));
 
 app.post('/api/reverse-geocode', wrap(async (req, res) => {
   const { lat, lng } = req.body;
-  const params = new URLSearchParams({ format: 'jsonv2', lat, lon: lng, zoom: 18, addressdetails: 1 });
-  const geoRes = await nominatimFetch(`${NOMINATIM_BASE}/reverse?${params}`, { headers: { 'User-Agent': UA } });
-  if (!geoRes.ok) return res.status(502).json({ detail: 'Nominatim returned an error' });
-
-  const data = await geoRes.json();
-  const address = data.address || {};
-  res.json({
-    street: address.road || '',
-    house_number: address.house_number || '',
-    city: address.city || address.town || address.village || '',
-    state: address.state || '',
-    display_name: data.display_name || '',
-  });
+  res.json(await reverseGeocodeLocation(lat, lng));
 }));
 
 app.post('/api/sweep-check', wrap(async (req, res) => {
-  const { address, today_date } = req.body;
+  const { address, today_date, past_noon } = req.body;
   if (!address) return res.status(400).json({ detail: 'Address required' });
-
-  const todayStr = today_date || new Date().toISOString().slice(0, 10);
-  const today = new Date(todayStr + 'T12:00:00Z');
-  const future = new Date(today);
-  future.setDate(future.getDate() + 30);
-  const tomorrowDate = new Date(today);
-  tomorrowDate.setDate(tomorrowDate.getDate() + 1);
-  const tomorrowStr = tomorrowDate.toISOString().slice(0, 10);
-
-  const suggestParams = new URLSearchParams({ q: address, locale: 'en-US' });
-  const suggestRes = await fetchWithTimeout(
-    `${RECOLLECT_BASE}/areas/Somerville/services/${RECOLLECT_SERVICE}/address-suggest?${suggestParams}`,
-    { headers: { 'User-Agent': UA } }
-  );
-  if (!suggestRes.ok) return res.status(502).json({ detail: 'Recollect address suggest error' });
-
-  const suggestions = await suggestRes.json();
-  if (!suggestions.length) return res.json({ found: false, message: 'Address not found in Somerville sweeping database' });
-
-  const place = suggestions[0];
-
-  const eventsParams = new URLSearchParams({ after: todayStr, before: future.toISOString().slice(0, 10), locale: 'en-US' });
-  const eventsRes = await fetchWithTimeout(
-    `${RECOLLECT_BASE}/places/${place.place_id}/services/${RECOLLECT_SERVICE}/events?${eventsParams}`,
-    { headers: { 'User-Agent': UA } }
-  );
-  if (!eventsRes.ok) return res.status(502).json({ detail: 'Recollect events error' });
-
-  const eventsData = await eventsRes.json();
-  const rawEvents = Array.isArray(eventsData) ? eventsData : (eventsData.events || []);
-
-  const sweepEvents = [];
-  for (const event of rawEvents) {
-    if (!event.flags || !event.day) continue;
-    for (const flag of event.flags) {
-      const name = flag.name || '';
-      if (!name.toLowerCase().includes('sweeping')) continue;
-      const m = name.match(/(\d{1,2})(AM|PM)_(\d{1,2})(AM|PM)/);
-      sweepEvents.push({
-        date: event.day,
-        type: name,
-        side: name.includes('EVEN') ? 'even' : name.includes('ODD') ? 'odd' : 'both',
-        time: m ? `${m[1]}:00 ${m[2]} - ${m[3]}:00 ${m[4]}` : name,
-      });
-    }
-  }
-
-  const houseMatch = address.trim().match(/^(\d+)/);
-  const houseNum = houseMatch ? parseInt(houseMatch[1]) : null;
-  const carSide = houseNum ? (houseNum % 2 === 0 ? 'even' : 'odd') : null;
-
-  const sweepingToday = sweepEvents.filter(e => e.date === todayStr);
-  const sweepingTomorrow = sweepEvents.filter(e => e.date === tomorrowStr);
-  const daysUntilNext = sweepEvents.length
-    ? Math.max(0, Math.ceil((new Date(sweepEvents[0].date) - new Date(todayStr)) / 86400000))
-    : null;
-
-  const sideLabel = (events) => [...new Set(events.map(e => e.side + ' side'))].join(', ');
-  const carMatches = (events) => !carSide || events.some(e => e.side === carSide);
-
-  let status, title, message;
-
-  if (sweepingToday.length) {
-    const sides = sideLabel(sweepingToday);
-    const pastNoon = req.body.past_noon || false;
-    if (pastNoon) {
-      status = 'info'; title = 'Sweeping Done for Today';
-      message = `Sweeping was scheduled today (${sides}, 8AM-12PM). It's past noon — you're clear.`;
-    } else if (carMatches(sweepingToday)) {
-      status = 'danger'; title = 'MOVE YOUR CAR';
-      message = `Sweeping TODAY on YOUR side (${sides}, 8AM-12PM). $50 fine!`;
-    } else {
-      status = 'warning'; title = 'Sweeping Today — Other Side';
-      message = `Sweeping today but on the ${sides} (you're on the ${carSide} side at #${houseNum}).`;
-    }
-  } else if (sweepingTomorrow.length) {
-    const sides = sideLabel(sweepingTomorrow);
-    if (carMatches(sweepingTomorrow)) {
-      status = 'warning'; title = 'Sweeping Tomorrow — YOUR Side';
-      message = `Sweeping TOMORROW on your side (${sides}, 8AM-12PM). Move tonight.`;
-    } else {
-      status = 'info'; title = 'Sweeping Tomorrow — Other Side';
-      message = `Sweeping tomorrow but on the ${sides}. You're on the ${carSide} side at #${houseNum}.`;
-    }
-  } else if (sweepEvents.length) {
-    const e = sweepEvents[0];
-    status = 'safe'; title = "You're Good";
-    message = `Next sweep in ${daysUntilNext} day${daysUntilNext !== 1 ? 's' : ''}: ${e.date} (${e.side} side, ${e.time})`;
-  } else {
-    status = 'safe'; title = 'No Sweeping Scheduled';
-    message = 'No sweeping events found in the next 30 days.';
-  }
-
-  // Forward geocode the matched address for map display
-  let latitude = null, longitude = null;
-  try {
-    const geoParams = new URLSearchParams({ q: (place.name || address) + ', Somerville, MA', format: 'jsonv2', limit: 1 });
-    const geoRes = await nominatimFetch(`${NOMINATIM_BASE}/search?${geoParams}`, { headers: { 'User-Agent': UA } });
-    if (geoRes.ok) {
-      const results = await geoRes.json();
-      if (results.length) {
-        latitude = parseFloat(results[0].lat);
-        longitude = parseFloat(results[0].lon);
-      }
-    }
-  } catch {}
-
-  res.json({
-    found: true,
-    place_name: place.name || address,
-    place_id: place.place_id,
-    status, title, message,
-    sweep_events: sweepEvents,
-    car_side: carSide,
-    house_num: houseNum,
-    days_until_next: daysUntilNext,
-    latitude,
-    longitude,
-  });
+  res.json(await runSweepCheck({ address, today_date, past_noon }));
 }));
 
 // Pre-configured app OAuth — credentials stay server-side
@@ -374,6 +391,116 @@ app.post('/api/oauth/refresh', wrap(async (req, res) => {
   const { client_id, refresh_token } = req.body;
   const data = await teslaTokenExchange({ grant_type: 'refresh_token', client_id, refresh_token });
   res.json({ access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in });
+}));
+
+// Daily-notification subscription endpoints. Stores the user's Tesla
+// refresh_token server-side so a 12pm ET cron can wake the car, check
+// the sweeping schedule, and DM via Slack on T-3/T-2/T-1.
+app.post('/api/notifications/enable', wrap(async (req, res) => {
+  const { refresh_token, oauth_mode = 'app', client_id, vehicle_id, vehicle_name, slack_user_id } = req.body;
+  if (!refresh_token || !slack_user_id || !vehicle_id) {
+    return res.status(400).json({ detail: 'refresh_token, slack_user_id, and vehicle_id are required' });
+  }
+  if (oauth_mode === 'custom' && !client_id) {
+    return res.status(400).json({ detail: 'custom oauth requires client_id' });
+  }
+  if (!SLACK_USER_ID_RE.test(slack_user_id)) {
+    return res.status(400).json({ detail: 'slack_user_id should look like U060NLFUM' });
+  }
+  // Validate the refresh_token by doing one round-trip. Catches typos
+  // and revoked tokens before we persist garbage.
+  let rotated;
+  try {
+    rotated = await teslaTokenExchange(buildRefreshParams(oauth_mode, refresh_token, client_id));
+  } catch (e) {
+    return res.status(400).json({ detail: 'Refresh token invalid: ' + e.message });
+  }
+  const subs = loadSubs();
+  // One subscription per (slack_user_id, vehicle_id) — re-enable replaces.
+  const filtered = subs.filter(s => !(s.slack_user_id === slack_user_id && s.vehicle_id === vehicle_id));
+  const sub = {
+    id: randomBytes(8).toString('hex'),
+    slack_user_id,
+    vehicle_id,
+    vehicle_name: vehicle_name || 'Unknown',
+    oauth_mode,
+    client_id: oauth_mode === 'custom' ? client_id : null,
+    refresh_token: rotated.refresh_token || refresh_token,
+    created_at: new Date().toISOString(),
+    last_check_at: null,
+  };
+  filtered.push(sub);
+  saveSubs(filtered);
+  res.json({ enabled: true, id: sub.id });
+}));
+
+app.post('/api/notifications/disable', wrap(async (req, res) => {
+  const { id, slack_user_id } = req.body;
+  if (!id || !slack_user_id) return res.status(400).json({ detail: 'id and slack_user_id required' });
+  const subs = loadSubs();
+  const before = subs.length;
+  // slack_user_id must match — prevents one user from disabling another's sub by guessing the id.
+  const filtered = subs.filter(s => !(s.id === id && s.slack_user_id === slack_user_id));
+  if (filtered.length === before) return res.status(404).json({ detail: 'Subscription not found' });
+  saveSubs(filtered);
+  res.json({ disabled: true });
+}));
+
+app.get('/api/notifications/status', (req, res) => {
+  const { slack_user_id } = req.query;
+  if (!slack_user_id) return res.status(400).json({ detail: 'slack_user_id required' });
+  res.json({ subscriptions: loadSubs().filter(s => s.slack_user_id === slack_user_id).map(publicSub) });
+});
+
+// Cron-callable: refresh each subscription's tokens, fetch + sweep-check,
+// return all results. Caller (tinyclaw scheduler) decides who to DM.
+// Cron fires at noon ET so past_noon is always false here — the
+// notifier filters days_until_next ∈ {1,2,3} anyway, never sweep-day.
+app.post('/api/notifications/run', wrap(async (req, res) => {
+  const auth = req.get('authorization') || '';
+  if (!NOTIFICATIONS_RUN_TOKEN || auth !== `Bearer ${NOTIFICATIONS_RUN_TOKEN}`) {
+    return res.status(401).json({ detail: 'Unauthorized' });
+  }
+  const subs = loadSubs();
+  const results = [];
+  for (const sub of subs) {
+    const out = { sub_id: sub.id, slack_user_id: sub.slack_user_id, vehicle_id: sub.vehicle_id, vehicle_name: sub.vehicle_name };
+    try {
+      const rotated = await teslaTokenExchange(buildRefreshParams(sub.oauth_mode, sub.refresh_token, sub.client_id));
+      // Tesla rotates refresh_tokens — persist the new one or the daily
+      // run will eventually 401 with a stale token.
+      if (rotated.refresh_token) sub.refresh_token = rotated.refresh_token;
+      const headers = { Authorization: `Bearer ${rotated.access_token}`, 'Content-Type': 'application/json' };
+
+      const locData = await fetchVehicleData(headers, sub.vehicle_id);
+      const { latitude, longitude } = locData.response?.drive_state || {};
+      if (latitude == null || longitude == null) throw new Error('No vehicle location');
+      out.battery_level = locData.response?.charge_state?.battery_level ?? null;
+
+      const geo = await reverseGeocodeLocation(latitude, longitude);
+      const addr = [geo.house_number, geo.street].filter(Boolean).join(' ');
+      out.address = geo.display_name || addr;
+      if (!addr) throw new Error('No street resolved from coordinates');
+
+      const sweep = await runSweepCheck({ address: addr, today_date: new Date().toISOString().slice(0, 10) });
+      out.found = !!sweep.found;
+      out.days_until_next = sweep.days_until_next ?? null;
+      out.status = sweep.status || null;
+      out.title = sweep.title || null;
+      out.message = sweep.message || null;
+      out.car_side = sweep.car_side || null;
+      out.next_event = sweep.sweep_events?.[0] || null;
+      out.ok = true;
+    } catch (e) {
+      out.ok = false;
+      out.error = e.message;
+    }
+    sub.last_check_at = new Date().toISOString();
+    sub.last_result = { ok: out.ok, days_until_next: out.days_until_next, error: out.error };
+    results.push(out);
+  }
+  if (subs.length) saveSubs(subs);
+  res.json({ ran_at: new Date().toISOString(), results });
 }));
 
 // API 404 catch — must be before the SPA catch-all

@@ -10,6 +10,29 @@ L.Icon.Default.mergeOptions({ iconUrl: markerIcon, iconRetinaUrl: markerIcon2x, 
 
 const API = import.meta.env.DEV ? '/sweeper/api' : 'api';
 
+// Cache successful vehicle checks for 6h so subsequent page loads
+// hydrate from localStorage instead of waking the car. The "Check My
+// Car" button still bypasses cache when the user wants fresh data.
+const CHECK_CACHE_MS = 6 * 60 * 60 * 1000;
+const CHECK_CACHE_KEY = 'tesla_last_check';
+function readCachedCheck(vehicleId) {
+  if (!vehicleId) return null;
+  try {
+    const c = JSON.parse(localStorage.getItem(CHECK_CACHE_KEY));
+    if (!c || c.vehicle_id !== vehicleId) return null;
+    if (Date.now() - c.at > CHECK_CACHE_MS) return null;
+    return c;
+  } catch { return null; }
+}
+function saveCachedCheck(vehicleId, payload) {
+  if (!vehicleId) return;
+  try {
+    localStorage.setItem(CHECK_CACHE_KEY, JSON.stringify({
+      vehicle_id: vehicleId, at: Date.now(), ...payload,
+    }));
+  } catch {}
+}
+
 async function post(url, body) {
   const res = await fetch(`${API}/${url}`, {
     method: 'POST',
@@ -121,6 +144,45 @@ function clientToday() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis, notifLoading, notifError, onEnable, onDisable }) {
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <h3>{'🔔'} Daily Slack Pings</h3>
+      <p style={{ fontSize: '0.85rem', color: '#8b949e', marginBottom: 12 }}>
+        Get a slack DM 1, 2, and 3 days before sweeping. Runs at 12pm ET daily; wakes the car briefly to read its location.
+      </p>
+      {enabledForThis ? (
+        <>
+          <p style={{ fontSize: '0.85rem', marginBottom: 12 }}>
+            {'✅'} Enabled for <strong>{enabledForThis.vehicle_name}</strong> — DMs go to <code>{enabledForThis.slack_user_id}</code>
+            {enabledForThis.last_check_at && <> · last check {new Date(enabledForThis.last_check_at).toLocaleString()}</>}
+          </p>
+          <button className="disconnect-btn" onClick={() => onDisable(enabledForThis.id)} disabled={notifLoading}>
+            {notifLoading ? 'Disabling...' : 'Disable Notifications'}
+          </button>
+        </>
+      ) : (
+        <>
+          <label htmlFor="slack-user-id">Slack User ID</label>
+          <input
+            id="slack-user-id"
+            placeholder="U060NLFUM"
+            value={slackUserId}
+            onChange={e => setSlackUserId(e.target.value.trim())}
+          />
+          <p style={{ fontSize: '0.75rem', color: '#8b949e', marginTop: -8, marginBottom: 12 }}>
+            In Slack: profile → ⋮ menu → Copy member ID
+          </p>
+          <button onClick={onEnable} disabled={notifLoading || !slackUserId}>
+            {notifLoading ? 'Enabling...' : 'Enable Daily Notifications'}
+          </button>
+        </>
+      )}
+      {notifError && <p style={{ fontSize: '0.85rem', color: '#f85149', marginTop: 8 }}>{notifError}</p>}
+    </div>
+  );
+}
+
 export default function App() {
   const [tab, setTab] = useState(() => {
     const p = new URLSearchParams(window.location.search).get('tab');
@@ -155,6 +217,11 @@ export default function App() {
   const [redirectUri, setRedirectUri] = useState(() => window.location.href.split('?')[0].split('#')[0]);
   const [registerPartner, setRegisterPartner] = useState(false);
 
+  const [slackUserId, setSlackUserId] = useState(() => localStorage.getItem('tesla_slack_user_id') || '');
+  const [subscriptions, setSubscriptions] = useState(null);
+  const [notifLoading, setNotifLoading] = useState(false);
+  const [notifError, setNotifError] = useState('');
+
   const refreshPromise = useRef(null);
 
   const autoCheckedRef = useRef(false);
@@ -167,12 +234,18 @@ export default function App() {
           const vid = selectedVehicle || (vlist.length === 1 ? vlist[0].id : null);
           if (vid && !autoCheckedRef.current) {
             autoCheckedRef.current = true;
-            // Auto-check fires on every page load while logged in.
-            // ONLY auto-check if the car is currently online —
-            // otherwise we'd silently wake the car every time the
-            // user opened the page, draining battery overnight.
-            // The user can still explicitly click "Check My Car"
-            // to force a wake-then-check.
+            // Hydrate from 6h cache if available — avoids waking the
+            // car on every page open within the window.
+            const cached = readCachedCheck(vid);
+            if (cached) {
+              setMapPos(cached.mapPos);
+              setVehicleInfo(cached.vehicleInfo);
+              setSweepData(cached.sweepData);
+              return;
+            }
+            // No cache: only auto-check if the car is already online.
+            // Avoids silently waking it on passive page loads. Manual
+            // "Check My Car" still forces a wake-then-check.
             const v = vlist.find(x => x.id === vid);
             if (v?.state === 'online') {
               checkVehicle(tokens.access_token, vid).catch(() => {});
@@ -182,6 +255,7 @@ export default function App() {
       }
     } else {
       localStorage.removeItem('tesla_tokens');
+      localStorage.removeItem(CHECK_CACHE_KEY);
     }
   }, [tokens]);
 
@@ -190,12 +264,73 @@ export default function App() {
     else localStorage.removeItem('tesla_selected_vehicle');
   }, [selectedVehicle]);
 
+  useEffect(() => {
+    if (slackUserId) localStorage.setItem('tesla_slack_user_id', slackUserId);
+  }, [slackUserId]);
+
+  useEffect(() => {
+    if (tokens && slackUserId) fetchSubscriptions(slackUserId);
+  }, [tokens, slackUserId]);
+
   const logout = () => {
     setTokens(null);
     setVehicles(null);
     setSelectedVehicle(null);
     setOauthStatus('');
+    setSubscriptions(null);
     reset();
+  };
+
+  const fetchSubscriptions = async (uid) => {
+    if (!uid) return;
+    try {
+      const res = await fetch(`${API}/notifications/status?slack_user_id=${encodeURIComponent(uid)}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setSubscriptions(data.subscriptions || []);
+    } catch {}
+  };
+
+  const enableNotifications = async () => {
+    setNotifError('');
+    if (!/^U[A-Z0-9]+$/.test(slackUserId)) {
+      setNotifError('Slack user ID looks like U060NLFUM (Slack profile → ⋮ → Copy member ID)');
+      return;
+    }
+    const vid = selectedVehicle || vehicles?.[0]?.id;
+    if (!vid || !tokens?.refresh_token) { setNotifError('Need a connected vehicle first'); return; }
+    setNotifLoading(true);
+    try {
+      const veh = vehicles.find(v => v.id === vid);
+      const data = await post('notifications/enable', {
+        refresh_token: tokens.refresh_token,
+        oauth_mode: tokens.oauth_mode,
+        client_id: tokens.client_id,
+        vehicle_id: vid,
+        vehicle_name: veh?.name || 'Unknown',
+        slack_user_id: slackUserId,
+      });
+      await fetchSubscriptions(slackUserId);
+      setNotifError('');
+      setOauthStatus(`\u{1F514} Daily slack pings enabled for ${veh?.name || 'this vehicle'}`);
+    } catch (e) {
+      setNotifError(e.message);
+    } finally {
+      setNotifLoading(false);
+    }
+  };
+
+  const disableNotifications = async (subId) => {
+    setNotifLoading(true);
+    setNotifError('');
+    try {
+      await post('notifications/disable', { id: subId, slack_user_id: slackUserId });
+      await fetchSubscriptions(slackUserId);
+    } catch (e) {
+      setNotifError(e.message);
+    } finally {
+      setNotifLoading(false);
+    }
   };
 
   const reset = () => {
@@ -281,18 +416,26 @@ export default function App() {
     }
 
     const geo = await post('reverse-geocode', { lat: vehicle.latitude, lng: vehicle.longitude });
-    setMapPos({ lat: vehicle.latitude, lng: vehicle.longitude, street: geo.street || 'Unknown' });
-    setVehicleInfo({ name: vehicle.vehicle_name, addr: geo.display_name });
+    const mapPosVal = { lat: vehicle.latitude, lng: vehicle.longitude, street: geo.street || 'Unknown' };
+    const vehicleInfoVal = { name: vehicle.vehicle_name, addr: geo.display_name };
+    setMapPos(mapPosVal);
+    setVehicleInfo(vehicleInfoVal);
 
     const addr = [geo.house_number, geo.street].filter(Boolean).join(' ');
     if (!addr) {
-      setSweepData({ found: true, status: 'info', title: 'Location Found', message: `Car at ${vehicle.latitude.toFixed(5)}, ${vehicle.longitude.toFixed(5)} but couldn't determine street.`, sweep_events: [] });
+      const fallback = { found: true, status: 'info', title: 'Location Found', message: `Car at ${vehicle.latitude.toFixed(5)}, ${vehicle.longitude.toFixed(5)} but couldn't determine street.`, sweep_events: [] };
+      setSweepData(fallback);
+      saveCachedCheck(vehicleId, { mapPos: mapPosVal, vehicleInfo: vehicleInfoVal, sweepData: fallback });
       return;
     }
 
     const data = await post('sweep-check', { address: addr, today_date: clientToday(), past_noon: new Date().getHours() >= 12 });
-    if (data.found) setSweepData(data);
-    else setError(`"${addr}" not in Somerville sweeping database.`);
+    if (data.found) {
+      setSweepData(data);
+      saveCachedCheck(vehicleId, { mapPos: mapPosVal, vehicleInfo: vehicleInfoVal, sweepData: data });
+    } else {
+      setError(`"${addr}" not in Somerville sweeping database.`);
+    }
   };
 
   const handleCheckAddress = async () => {
@@ -489,6 +632,17 @@ export default function App() {
               )}
               {vehicles && vehicles.length > 0 && (
                 <button onClick={() => handleCheckCar(selectedVehicle)} disabled={loading || (vehicles.length > 1 && !selectedVehicle)}>{loading ? (waking ? 'Waking your car... (up to 60s)' : 'Checking...') : 'Check My Car'}</button>
+              )}
+              {vehicles && vehicles.length > 0 && (
+                <NotificationsPanel
+                  slackUserId={slackUserId}
+                  setSlackUserId={setSlackUserId}
+                  enabledForThis={subscriptions?.find(s => s.vehicle_id === (selectedVehicle || vehicles[0].id))}
+                  notifLoading={notifLoading}
+                  notifError={notifError}
+                  onEnable={enableNotifications}
+                  onDisable={disableNotifications}
+                />
               )}
               <button className="disconnect-btn" onClick={logout}>Disconnect</button>
             </>
