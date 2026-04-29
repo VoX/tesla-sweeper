@@ -173,10 +173,15 @@ function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis, notif
         </>
       ) : (
         <>
+          {slackUserId ? (
+            <p style={{ fontSize: '0.85rem', marginBottom: 12 }}>
+              {'🔐'} Signed in as <code>{slackUserId}</code>. Click Enable to subscribe, or sign in as someone else.
+            </p>
+          ) : null}
           <button onClick={onSlackSignIn} disabled={notifLoading} style={{ marginBottom: 12 }}>
-            {notifLoading ? 'Connecting to Slack...' : 'Sign in with Slack'}
+            {notifLoading ? 'Connecting to Slack...' : (slackUserId ? 'Switch slack account' : 'Sign in with Slack')}
           </button>
-          <details style={{ marginBottom: 12 }}>
+          <details style={{ marginBottom: 12 }} open={!slackUserId ? false : undefined}>
             <summary style={{ fontSize: '0.8rem', color: '#8b949e', cursor: 'pointer' }}>or paste your slack user id manually</summary>
             <label htmlFor="slack-user-id" style={{ marginTop: 8, display: 'block' }}>Slack User ID or Profile URL</label>
             <input
@@ -286,7 +291,10 @@ export default function App() {
 
   useEffect(() => {
     if (tokens && slackUserId) fetchSubscriptions(slackUserId);
-  }, [tokens, slackUserId]);
+    // Key on the stable refresh_token string instead of the tokens
+    // object — token refresh creates a new object every ~7h and we
+    // don't need to re-fetch subs on each silent rotation.
+  }, [tokens?.refresh_token, slackUserId]);
 
   const logout = () => {
     setTokens(null);
@@ -548,6 +556,8 @@ export default function App() {
 
     if (slackState && state === slackState) {
       sessionStorage.removeItem('slack_oauth_state');
+      setOauthStatus('Exchanging slack code for identity...');
+      setNotifLoading(true);
       post('slack/oauth/callback', { code })
         .then(data => {
           if (!data.slack_user_id) throw new Error('Slack returned no user_id');
@@ -555,13 +565,16 @@ export default function App() {
           setNotifError('');
           setOauthStatus(`\u{1F510} Signed in as ${data.name || data.slack_user_id} — click Enable Daily Notifications to subscribe.`);
         })
-        .catch(e => setNotifError('Slack sign-in failed: ' + e.message))
+        .catch(e => {
+          setNotifError('Slack sign-in failed: ' + e.message);
+          setOauthStatus('❌ Slack sign-in failed: ' + e.message);
+        })
         .finally(() => setNotifLoading(false));
       return;
     }
 
     if (!teslaState || state !== teslaState) {
-      setError('OAuth state mismatch — possible CSRF. Try again.');
+      setError(`OAuth state mismatch (slack=${!!slackState}, tesla=${!!teslaState}). Try again.`);
       return;
     }
 

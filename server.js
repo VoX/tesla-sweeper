@@ -1,7 +1,7 @@
 import express from 'express';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -108,7 +108,10 @@ async function teslaTokenExchange(params) {
   });
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));
-    console.error('Tesla token error:', body);
+    // Log only the documented error fields — the full body could
+    // include the refresh_token in error responses for some grant
+    // types, and ec2-user logs are readable to anyone with shell.
+    console.error('Tesla token error:', { error: body.error, description: body.error_description });
     throw new Error(body.error_description || body.error || 'Token exchange failed');
   }
   return r.json();
@@ -277,7 +280,7 @@ app.post('/api/vehicles', wrap(async (req, res) => {
   if (!vehiclesRes.ok) {
     const errBody = await vehiclesRes.text().catch(() => '');
     console.error('[vehicles] Tesla API error:', vehiclesRes.status, errBody);
-    return res.status(vehiclesRes.status).json({ detail: `Tesla API error (${vehiclesRes.status})`, tesla_error: errBody });
+    return res.status(vehiclesRes.status).json({ detail: `Tesla API error (${vehiclesRes.status})` });
   }
 
   const vehicles = (await vehiclesRes.json()).response || [];
@@ -427,16 +430,16 @@ app.post('/api/slack/oauth/callback', wrap(async (req, res) => {
   });
   const data = await tokenRes.json();
   if (!data.ok) throw new Error(data.error || 'Slack token exchange failed');
-  const userRes = await fetchWithTimeout('https://slack.com/api/openid.connect.userInfo', {
-    headers: { Authorization: `Bearer ${data.access_token}` },
-  });
-  const userData = await userRes.json();
-  if (!userData.ok) throw new Error(userData.error || 'Slack userInfo failed');
+  if (!data.id_token) throw new Error('Slack returned no id_token');
+  // Decode the id_token JWT instead of a second userInfo round-trip.
+  // Slack signed it and we got it over TLS in the same exchange, so
+  // signature verification adds no security at this seam.
+  const claims = JSON.parse(Buffer.from(data.id_token.split('.')[1], 'base64url').toString());
   res.json({
-    slack_user_id: userData['https://slack.com/user_id'],
-    team_id: userData['https://slack.com/team_id'],
-    email: userData.email,
-    name: userData.name,
+    slack_user_id: claims['https://slack.com/user_id'],
+    team_id: claims['https://slack.com/team_id'],
+    email: claims.email,
+    name: claims.name,
   });
 }));
 
@@ -503,9 +506,15 @@ app.get('/api/notifications/status', (req, res) => {
 // return all results. Caller (tinyclaw scheduler) decides who to DM.
 // Cron fires at noon ET so past_noon is always false here — the
 // notifier filters days_until_next ∈ {1,2,3} anyway, never sweep-day.
+function bearerOk(authHeader, token) {
+  if (!token) return false;
+  const expected = `Bearer ${token}`;
+  if (authHeader.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(authHeader), Buffer.from(expected));
+}
+
 app.post('/api/notifications/run', wrap(async (req, res) => {
-  const auth = req.get('authorization') || '';
-  if (!NOTIFICATIONS_RUN_TOKEN || auth !== `Bearer ${NOTIFICATIONS_RUN_TOKEN}`) {
+  if (!bearerOk(req.get('authorization') || '', NOTIFICATIONS_RUN_TOKEN)) {
     return res.status(401).json({ detail: 'Unauthorized' });
   }
   const subs = loadSubs();
@@ -514,9 +523,13 @@ app.post('/api/notifications/run', wrap(async (req, res) => {
     const out = { sub_id: sub.id, slack_user_id: sub.slack_user_id, vehicle_id: sub.vehicle_id, vehicle_name: sub.vehicle_name };
     try {
       const rotated = await teslaTokenExchange(buildRefreshParams(sub.oauth_mode, sub.refresh_token, sub.client_id));
-      // Tesla rotates refresh_tokens — persist the new one or the daily
-      // run will eventually 401 with a stale token.
-      if (rotated.refresh_token) sub.refresh_token = rotated.refresh_token;
+      // Tesla rotates refresh_tokens — persist the new one immediately
+      // so a later iteration crash doesn't lose it (next run's stale
+      // token would 401 and brick the sub).
+      if (rotated.refresh_token && rotated.refresh_token !== sub.refresh_token) {
+        sub.refresh_token = rotated.refresh_token;
+        saveSubs(subs);
+      }
       const headers = { Authorization: `Bearer ${rotated.access_token}`, 'Content-Type': 'application/json' };
 
       const locData = await fetchVehicleData(headers, sub.vehicle_id);
