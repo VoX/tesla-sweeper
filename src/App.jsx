@@ -303,8 +303,9 @@ export default function App() {
 
   const enableNotifications = async () => {
     setNotifError('');
-    if (!/^U[A-Z0-9]+$/.test(slackUserId)) {
-      setNotifError('Slack user ID looks like U060NLFUM (Slack profile → ⋮ → Copy member ID)');
+    const pairToken = sessionStorage.getItem('subscribe_pair_token');
+    if (!pairToken && !/^U[A-Z0-9]+$/.test(slackUserId)) {
+      setNotifError('Slack user ID looks like U060NLFUM (or DM tinyclaw "subscribe my tesla" to skip this step)');
       return;
     }
     const vid = selectedVehicle || vehicles?.[0]?.id;
@@ -318,9 +319,15 @@ export default function App() {
         client_id: tokens.client_id,
         vehicle_id: vid,
         vehicle_name: veh?.name || 'Unknown',
-        slack_user_id: slackUserId,
+        slack_user_id: pairToken ? undefined : slackUserId,
+        pair_token: pairToken || undefined,
       });
-      await fetchSubscriptions(slackUserId);
+      const finalUid = data.slack_user_id || slackUserId;
+      if (pairToken) {
+        sessionStorage.removeItem('subscribe_pair_token');
+        setSlackUserId(finalUid);
+      }
+      await fetchSubscriptions(finalUid);
       setNotifError('');
       setOauthStatus(`\u{1F514} Daily slack pings enabled for ${veh?.name || 'this vehicle'}`);
     } catch (e) {
@@ -579,6 +586,31 @@ export default function App() {
         ['tesla_client_id', 'tesla_client_secret', 'tesla_redirect_uri', 'tesla_oauth_state'].forEach(k => sessionStorage.removeItem(k));
         setLoading(false);
       });
+  }, []);
+
+  // Magic-link entry from "subscribe my tesla" DM. Stash the token in
+  // sessionStorage so it survives the Tesla OAuth round-trip, strip it
+  // from the URL, and resolve it to a slack_user_id for autofill.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('subscribe');
+    if (!token) return;
+    sessionStorage.setItem('subscribe_pair_token', token);
+    params.delete('subscribe');
+    const q = params.toString();
+    window.history.replaceState({}, '', window.location.pathname + (q ? '?' + q : ''));
+    fetch(`${API}/notifications/pair-info?token=${encodeURIComponent(token)}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d?.slack_user_id) {
+          setSlackUserId(d.slack_user_id);
+          setOauthStatus(`\u{1F517} Paired via slack DM as ${d.slack_user_id}. Connect Tesla and hit Enable.`);
+        } else {
+          sessionStorage.removeItem('subscribe_pair_token');
+          setNotifError('Pairing link expired — DM tinyclaw again to get a fresh one.');
+        }
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
