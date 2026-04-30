@@ -3,6 +3,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
+import cron from 'node-cron';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -61,16 +62,20 @@ const SUBS_DIR = join(__dirname, 'data');
 const SUBS_FILE = join(SUBS_DIR, 'subscriptions.json');
 const NOTIFICATIONS_RUN_TOKEN = process.env.NOTIFICATIONS_RUN_TOKEN || '';
 mkdirSync(SUBS_DIR, { recursive: true, mode: 0o700 });
-function loadSubs() {
+function loadStore() {
   try {
-    return JSON.parse(readFileSync(SUBS_FILE, 'utf8')).subscriptions || [];
-  } catch { return []; }
+    return JSON.parse(readFileSync(SUBS_FILE, 'utf8'));
+  } catch { return { subscriptions: [] }; }
 }
-function saveSubs(subs) {
+function saveStore(store) {
   const tmp = SUBS_FILE + '.tmp';
-  writeFileSync(tmp, JSON.stringify({ subscriptions: subs }, null, 2), { mode: 0o600 });
+  writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 });
   renameSync(tmp, SUBS_FILE);
 }
+function loadSubs() { return loadStore().subscriptions || []; }
+function saveSubs(subs) { const s = loadStore(); s.subscriptions = subs; saveStore(s); }
+function getLastRunAt() { return loadStore().last_run_at || null; }
+function setLastRunAt(ts) { const s = loadStore(); s.last_run_at = ts; saveStore(s); }
 function publicSub(s) {
   return { id: s.id, slack_user_id: s.slack_user_id, vehicle_name: s.vehicle_name, vehicle_id: s.vehicle_id, oauth_mode: s.oauth_mode, created_at: s.created_at, last_check_at: s.last_check_at };
 }
@@ -537,10 +542,36 @@ function bearerOk(authHeader, token) {
   return timingSafeEqual(Buffer.from(authHeader), Buffer.from(expected));
 }
 
-app.post('/api/notifications/run', wrap(async (req, res) => {
-  if (!bearerOk(req.get('authorization') || '', NOTIFICATIONS_RUN_TOKEN)) {
-    return res.status(401).json({ detail: 'Unauthorized' });
-  }
+// Format an outbound move-your-car DM. Lead with vehicle + day count,
+// follow with date/time/side, address, and a link back to the SPA.
+function formatSweepDM(out) {
+  const days = out.days_until_next;
+  const event = out.next_event || {};
+  const dayLabel = event.date
+    ? new Date(event.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' })
+    : '';
+  const sideLabel = event.side === 'both' ? 'both sides' : `*${event.side}* side`;
+  return [
+    `:broom: *${out.vehicle_name}* — sweep in ${days} day${days === 1 ? '' : 's'} on the ${sideLabel}.`,
+    `${dayLabel}, ${event.time}`,
+    `:round_pushpin: ${out.address || 'address unresolved'}`,
+    `<https://claw.bitvox.me/sweeper/>`,
+  ].join('\n');
+}
+
+// Decide whether a /run result warrants a DM. Filter on T-3/T-2/T-1
+// AND only when the upcoming sweep covers the user's parked side
+// (or both sides) — no point pinging on a sweep that misses.
+function shouldNotifySweep(out) {
+  if (!out.ok || !out.found) return false;
+  if (![1, 2, 3].includes(out.days_until_next)) return false;
+  const eventSide = out.next_event?.side;
+  if (!eventSide) return false;
+  if (eventSide === 'both') return true;
+  return out.car_side === eventSide;
+}
+
+async function runNotifications() {
   const subs = loadSubs();
   const results = [];
   for (const sub of subs) {
@@ -584,7 +615,23 @@ app.post('/api/notifications/run', wrap(async (req, res) => {
     results.push(out);
   }
   if (subs.length) saveSubs(subs);
-  res.json({ ran_at: new Date().toISOString(), results });
+  for (const out of results) {
+    if (!shouldNotifySweep(out)) continue;
+    const dm = await postSlackDM(out.slack_user_id, formatSweepDM(out));
+    out.dm_sent = dm.ok;
+    out.dm_error = dm.error || null;
+  }
+  setLastRunAt(new Date().toISOString());
+  return { ran_at: new Date().toISOString(), results };
+}
+
+// Manual trigger / monitoring endpoint. Same logic the in-process
+// noon-ET cron calls.
+app.post('/api/notifications/run', wrap(async (req, res) => {
+  if (!bearerOk(req.get('authorization') || '', NOTIFICATIONS_RUN_TOKEN)) {
+    return res.status(401).json({ detail: 'Unauthorized' });
+  }
+  res.json(await runNotifications());
 }));
 
 // API 404 catch — must be before the SPA catch-all
@@ -596,5 +643,35 @@ app.get('*', (req, res) => res.sendFile(join(__dirname, 'dist', 'index.html')));
 process.on('uncaughtException', (e) => console.error('Uncaught:', e));
 process.on('unhandledRejection', (e) => console.error('Unhandled rejection:', e));
 
+// Daily noon-ET notification cron. node-cron handles DST via the
+// timezone string, so the calendar expression stays identical year-round.
+function startNotificationCron() {
+  cron.schedule('0 12 * * *', () => {
+    console.log('[cron] firing daily notification run');
+    runNotifications().catch(e => console.error('[cron] runNotifications failed:', e.message));
+  }, { timezone: 'America/New_York' });
+}
+
+// On boot, recover a missed run. If we're already past noon ET today
+// and the last successful run was on a prior date (in ET), fire once.
+// Avoids the failure mode where the service restarts between 12:00pm
+// and tomorrow's cron, silently skipping today.
+function maybeRecoverMissedRun() {
+  const fmtDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' });
+  const fmtHour = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false });
+  const todayET = fmtDate.format(new Date());
+  const hourET = parseInt(fmtHour.format(new Date()), 10);
+  if (hourET < 12) return;
+  const last = getLastRunAt();
+  const lastDateET = last ? fmtDate.format(new Date(last)) : null;
+  if (lastDateET === todayET) return;
+  console.log(`[cron] recovering missed run (last: ${lastDateET || 'never'}, today: ${todayET})`);
+  runNotifications().catch(e => console.error('[cron] missed-run recovery failed:', e.message));
+}
+
 const PORT = process.env.PORT || 20040;
-app.listen(PORT, '127.0.0.1', () => console.log(`Tesla Sweeper on http://127.0.0.1:${PORT}`));
+app.listen(PORT, '127.0.0.1', () => {
+  console.log(`Tesla Sweeper on http://127.0.0.1:${PORT}`);
+  startNotificationCron();
+  maybeRecoverMissedRun();
+});

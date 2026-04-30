@@ -8,7 +8,7 @@ Street sweeping checker for Somerville, MA. Tells you if your car needs to move.
 - **Frontend:** `src/App.jsx` — React 18 app with Vite. Three tabs: Address lookup, Tesla Login (pre-configured OAuth), Custom OAuth (BYO credentials).
 - **Hosting:** Caddy reverse proxy at `claw.bitvox.me/sweeper/` with `handle_path /sweeper/*` stripping the prefix.
 - **Storage:** `data/subscriptions.json` (mode 0600, atomic writes) — daily-notification subscriptions including Tesla `refresh_token`s. Gitignored.
-- **Daily notifications:** an external cron (currently `tinyclaw`'s scheduler plugin) POSTs `/api/notifications/run` at noon ET. The handler refreshes tokens, wakes vehicles, reverse-geocodes, sweep-checks, and returns aggregated results. The caller decides who to DM based on `days_until_next ∈ {1,2,3}`.
+- **Daily notifications:** in-process `node-cron` schedule registered from `app.listen`'s callback, fires `0 12 * * *` in `America/New_York`. `runNotifications()` refreshes tokens, wakes vehicles, reverse-geocodes, sweep-checks, and sends Slack DMs in-line for `days_until_next ∈ {1,2,3}` results that match the user's parked side. Missed-run recovery on startup if past noon ET and `last_run_at` is from a prior date.
 
 ## External APIs
 

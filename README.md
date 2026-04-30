@@ -109,9 +109,10 @@ Tokens are stored in localStorage for session persistence. Refresh tokens are us
 - **`dist/`** — built React bundle served by Express's static middleware. Rebuilt with `npm run build`.
 
 ### Notification cron
-- Owned by an external scheduler (currently `tinyclaw`'s mcp scheduler plugin) — fires `*-*-* 12:00:00 America/New_York` and POSTs to `/api/notifications/run` with the bearer.
-- The handler refreshes each sub's Tesla token (rotating in place), wakes the car if asleep, fetches `vehicle_data?endpoints=location_data;charge_state`, reverse-geocodes, runs `runSweepCheck`, and returns aggregated results.
-- Caller decides who to DM based on `days_until_next ∈ {1,2,3}`. Sub failures are isolated per-iteration; one bad Tesla token doesn't take down others.
+- **In-process via `node-cron`.** `server.js` registers `cron.schedule('0 12 * * *', runNotifications, { timezone: 'America/New_York' })` from the `app.listen` callback, so the scheduler comes up with the service and goes down with it.
+- `runNotifications()` refreshes each sub's Tesla token (rotating in place), wakes asleep cars, reverse-geocodes, runs `runSweepCheck`, sends a Slack DM via `chat.postMessage` for any result with `days_until_next ∈ {1,2,3}` AND a side that matches the user's parked side. Per-sub failures are isolated.
+- **Missed-run recovery:** on startup, if it's past noon ET and `subscriptions.json#last_run_at` is from a prior date, fire one immediately. Guards against the service being restarted between noon and midnight.
+- `POST /api/notifications/run` (bearer-auth via `NOTIFICATIONS_RUN_TOKEN`) calls the same function for manual triggering / monitoring.
 
 ### Common ops
 
