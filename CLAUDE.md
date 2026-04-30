@@ -7,6 +7,8 @@ Street sweeping checker for Somerville, MA. Tells you if your car needs to move.
 - **Backend:** `server.js` — Express server on port 20040. Proxies three external APIs and serves the built React app as static files. Loads credentials from `.env`.
 - **Frontend:** `src/App.jsx` — React 18 app with Vite. Three tabs: Address lookup, Tesla Login (pre-configured OAuth), Custom OAuth (BYO credentials).
 - **Hosting:** Caddy reverse proxy at `claw.bitvox.me/sweeper/` with `handle_path /sweeper/*` stripping the prefix.
+- **Storage:** `data/subscriptions.json` (mode 0600, atomic writes) — daily-notification subscriptions including Tesla `refresh_token`s. Gitignored.
+- **Daily notifications:** an external cron (currently `tinyclaw`'s scheduler plugin) POSTs `/api/notifications/run` at noon ET. The handler refreshes tokens, wakes vehicles, reverse-geocodes, sweep-checks, and returns aggregated results. The caller decides who to DM based on `days_until_next ∈ {1,2,3}`.
 
 ## External APIs
 
@@ -32,21 +34,44 @@ Street sweeping checker for Somerville, MA. Tells you if your car needs to move.
 
 ## OAuth Flows
 
-### Pre-configured ("Tesla Login" tab)
+### Tesla pre-configured ("Tesla Login" tab)
 - Credentials stored server-side in `.env` (TESLA_CLIENT_ID, TESLA_CLIENT_SECRET, TESLA_REDIRECT_URI)
 - Client never sees the client_secret — server handles token exchange
 - Endpoints: `/api/oauth/app/start`, `/api/oauth/app/callback`, `/api/oauth/app/refresh`
 
-### Custom ("Custom OAuth" tab)
+### Tesla custom ("Custom OAuth" tab)
 - User provides their own client_id, client_secret, redirect_uri
 - Optional partner registration checkbox (calls partner_accounts endpoint)
 - Endpoints: `/api/oauth/start`, `/api/oauth/callback`, `/api/oauth/refresh`
+
+### Sign in with Slack (OIDC)
+- Used to identify the user for notification subscriptions without manual id-paste
+- Endpoints: `/api/slack/oauth/{start,callback}`. Scope: `openid profile`.
+- Callback decodes the `id_token` JWT (no second `userInfo` round-trip) for `https://slack.com/user_id`, `team_id`, email, name. No signature verification — token came from Slack over TLS in the same request.
+- Frontend stores `slack_oauth_state` in sessionStorage; the OAuth-callback effect disambiguates slack vs tesla state on redirect.
+- Manual paste still supported as a fallback (`parseSlackInput` extracts U-id from raw input or pasted slack URL).
 
 ### Token storage
 - Access token, refresh token, client_id, oauth_mode, and expiry stored in localStorage
 - client_secret is NOT stored in localStorage — only lives in sessionStorage during the redirect flow
 - Refresh tokens are single-use (Tesla rotates them); the new one is saved on each refresh
 - 60-second interval checks token expiry and auto-refreshes
+
+## Daily notifications subsystem
+
+### Endpoints
+- `POST /api/notifications/enable` — body `{refresh_token, oauth_mode, client_id?, vehicle_id, vehicle_name, slack_user_id}`. Validates token via one Tesla refresh, persists, sends a confirmation Slack DM. Returns `{enabled, id, test_dm_ok, test_dm_error}`.
+- `POST /api/notifications/disable` — body `{id, slack_user_id}`. Slack id must match — guards against one user disabling another's sub.
+- `GET /api/notifications/status?slack_user_id=X` — returns subs filtered by user (with `publicSub` field-strip dropping `refresh_token`).
+- `POST /api/notifications/run` — bearer-auth via `NOTIFICATIONS_RUN_TOKEN` (constant-time compare via `crypto.timingSafeEqual` because the endpoint is internet-reachable through Caddy). Iterates subs, refreshes tokens (persisted per-iteration on rotation), wakes vehicles, runs `runSweepCheck`, returns aggregated results. Failures are isolated per-sub.
+
+### Confirmation + cron DMs
+- Both use `postSlackDM(slack_user_id, text)` calling `chat.postMessage` with `SLACK_BOT_TOKEN` (currently reusing tinyclaw's bot identity). Channel param can be a U-id; Slack auto-resolves to a 1:1 IM.
+
+### 6h check cache
+- `localStorage` key `tesla_last_check` stores `{vehicle_id, at, mapPos, vehicleInfo, sweepData}`.
+- Auto-check on page load hydrates from cache if fresh AND vehicle_id matches; otherwise only fires a live check if the car is `state==online` (asleep cars stay asleep on passive loads).
+- "Check My Car" button always bypasses cache.
 
 ## Key Design Decisions
 

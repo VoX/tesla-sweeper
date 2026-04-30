@@ -14,6 +14,16 @@ Two ways to check:
 
 Also supports a **Custom OAuth** tab for developers who want to use their own Tesla API credentials.
 
+### Daily Slack notifications
+
+Once connected, opt-in via "🔔 Daily Slack Pings" to receive a Slack DM from `tinyclaw` 1, 2, and 3 days before each sweeping event that affects your side. Sign in with Slack (OIDC) auto-fills your user id, or paste it manually. Subscriptions store the Tesla `refresh_token` server-side (mode 0600) so a noon-ET cron can refresh, locate, and notify without the user keeping the page open.
+
+A confirmation DM is sent the moment you click Enable so you know the wiring works.
+
+### 6h check cache
+
+Subsequent page opens within 6 hours of a successful "Check My Car" hydrate from `localStorage` instead of waking the car again. The button still bypasses cache for an explicit live check.
+
 ## Stack
 
 - **Backend:** Node.js / Express, proxies Tesla Fleet API + Recollect API + Nominatim geocoding
@@ -39,11 +49,16 @@ npm start
 
 ### Environment variables
 
-| Variable | Description |
-|---|---|
-| `TESLA_CLIENT_ID` | Tesla developer app client ID |
-| `TESLA_CLIENT_SECRET` | Tesla developer app client secret |
-| `TESLA_REDIRECT_URI` | OAuth redirect URI (e.g. `https://claw.bitvox.me/sweeper/`) |
+| Variable | Required for | Description |
+|---|---|---|
+| `TESLA_CLIENT_ID` | Tesla Login tab | Tesla developer app client ID |
+| `TESLA_CLIENT_SECRET` | Tesla Login tab | Tesla developer app client secret |
+| `TESLA_REDIRECT_URI` | Tesla Login tab | OAuth redirect URI (e.g. `https://claw.bitvox.me/sweeper/`) |
+| `NOTIFICATIONS_RUN_TOKEN` | Daily cron | Bearer token guarding `POST /api/notifications/run`. Generate with `openssl rand -hex 32`. |
+| `SLACK_CLIENT_ID` | Sign in with Slack | OIDC client id from a Slack app (api.slack.com/apps) |
+| `SLACK_CLIENT_SECRET` | Sign in with Slack | OIDC client secret |
+| `SLACK_REDIRECT_URI` | Sign in with Slack | Same URL added under app's Redirect URLs (e.g. `https://claw.bitvox.me/sweeper/`) |
+| `SLACK_BOT_TOKEN` | Confirmation + cron DMs | `xoxb-…` bot token with `chat:write` scope |
 
 ## How sweeping detection works
 
@@ -75,6 +90,45 @@ Tokens are stored in localStorage for session persistence. Refresh tokens are us
 3. Set redirect URI to your app's URL
 4. Host an EC P-256 public key at `/.well-known/appspecific/com.tesla.3p.public-key.pem`
 5. Register with the Fleet API via the partner_accounts endpoint
+
+## Operations
+
+### Hosting
+- **Box:** EC2 Graviton (4 vCPU / 16 GB) running Amazon Linux 2023, single-tenant.
+- **Reverse proxy:** Caddy on `claw.bitvox.me` with `handle_path /sweeper/*` stripping the prefix and proxying to `localhost:20040`. The `/sweeper/api/*` namespace IS internet-reachable — `/api/notifications/run` therefore relies on `NOTIFICATIONS_RUN_TOKEN` + `crypto.timingSafeEqual` for auth.
+- **TLS:** Caddy auto-issues from Let's Encrypt.
+
+### Service
+- **Unit:** `tesla-sweeper.service` (systemd user-level, lives at `~/.config/systemd/user/tesla-sweeper.service`).
+- **Process:** `node server.js` listens on `127.0.0.1:20040`. Restart with `systemctl --user restart tesla-sweeper.service`.
+- **Logs:** `journalctl --user -u tesla-sweeper.service`. Notable lines: `[wake]`, `[check]`, `[vehicles]`, Tesla token errors.
+
+### State on disk
+- **`.env`** (mode 0600) — all credentials. Never committed (gitignored).
+- **`data/subscriptions.json`** (mode 0600) — daily-notification subscriptions including Tesla `refresh_token`s. Atomic writes via temp+rename. Gitignored.
+- **`dist/`** — built React bundle served by Express's static middleware. Rebuilt with `npm run build`.
+
+### Notification cron
+- Owned by an external scheduler (currently `tinyclaw`'s mcp scheduler plugin) — fires `*-*-* 12:00:00 America/New_York` and POSTs to `/api/notifications/run` with the bearer.
+- The handler refreshes each sub's Tesla token (rotating in place), wakes the car if asleep, fetches `vehicle_data?endpoints=location_data;charge_state`, reverse-geocodes, runs `runSweepCheck`, and returns aggregated results.
+- Caller decides who to DM based on `days_until_next ∈ {1,2,3}`. Sub failures are isolated per-iteration; one bad Tesla token doesn't take down others.
+
+### Common ops
+
+| Action | Command |
+|---|---|
+| Tail logs | `journalctl --user -u tesla-sweeper -f` |
+| Restart after code change | `npm run build && systemctl --user restart tesla-sweeper.service` |
+| List subscriptions | `cat data/subscriptions.json \| jq` |
+| Disable a sub manually | `curl -X POST -H 'Content-Type: application/json' -d '{"id":"...","slack_user_id":"U..."}' localhost:20040/api/notifications/disable` |
+| Trigger run on demand | `curl -X POST -H "Authorization: Bearer $NOTIFICATIONS_RUN_TOKEN" localhost:20040/api/notifications/run` |
+| Rotate run token | edit `.env`, `systemctl --user restart`, update scheduler payload |
+
+### Failure modes
+- **Tesla 401 on cron**: refresh token expired (90+ days unused) or revoked. User must re-Enable. Other subs unaffected.
+- **Vehicle won't wake (504 in run)**: car in deep hibernation or no cell signal. Sub stays valid; next day's run retries.
+- **Slack `chat.postMessage` fails**: the test DM error is surfaced in the SPA banner; cron-side failures are logged but don't crash the run.
+- **Recollect/Nominatim outage**: `runSweepCheck` throws, sub's `last_result.error` records it, no DM sent. Auto-recovers next run.
 
 ## License
 

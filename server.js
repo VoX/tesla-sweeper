@@ -528,10 +528,8 @@ app.get('/api/notifications/status', (req, res) => {
   res.json({ subscriptions: loadSubs().filter(s => s.slack_user_id === slack_user_id).map(publicSub) });
 });
 
-// Cron-callable: refresh each subscription's tokens, fetch + sweep-check,
-// return all results. Caller (tinyclaw scheduler) decides who to DM.
-// Cron fires at noon ET so past_noon is always false here — the
-// notifier filters days_until_next ∈ {1,2,3} anyway, never sweep-day.
+// Cron fires at noon ET so past_noon is always false — the notifier
+// filters days_until_next ∈ {1,2,3} anyway, never sweep-day.
 function bearerOk(authHeader, token) {
   if (!token) return false;
   const expected = `Bearer ${token}`;

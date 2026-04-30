@@ -46,6 +46,15 @@ async function post(url, body) {
   return res.json();
 }
 
+async function get(url) {
+  const res = await fetch(`${API}/${url}`);
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({ detail: 'API error' }));
+    throw new Error(e.detail || 'API error');
+  }
+  return res.json();
+}
+
 function StatusBox({ status, title, message }) {
   const icon = { danger: '\u{1F6A8}', warning: '\u26A0\uFE0F', safe: '\u2705', info: '\u2139\uFE0F' }[status] || '';
   return (
@@ -308,11 +317,11 @@ export default function App() {
   const fetchSubscriptions = async (uid) => {
     if (!uid) return;
     try {
-      const res = await fetch(`${API}/notifications/status?slack_user_id=${encodeURIComponent(uid)}`);
-      if (!res.ok) return;
-      const data = await res.json();
+      const data = await get(`notifications/status?slack_user_id=${encodeURIComponent(uid)}`);
       setSubscriptions(data.subscriptions || []);
-    } catch {}
+    } catch (e) {
+      console.warn('[fetchSubscriptions]', e.message);
+    }
   };
 
   const enableNotifications = async () => {
