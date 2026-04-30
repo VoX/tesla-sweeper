@@ -128,9 +128,9 @@ function buildRefreshParams(oauth_mode, refresh_token, client_id) {
   return { grant_type: 'refresh_token', client_id: id, refresh_token };
 }
 
-// Post a Slack DM via chat.postMessage. Slack auto-resolves a U-id
-// to a 1:1 IM channel. Returns {ok, error?} so callers can surface
-// failure to the user without throwing.
+// Post a Slack DM via chat.postMessage. mrkdwn:false defangs any
+// `<...>`/`*...*` chars that slipped in from user-supplied vehicle
+// names or Nominatim address strings — DMs render plain text.
 async function postSlackDM(slack_user_id, text) {
   if (!SLACK_BOT_TOKEN) return { ok: false, error: 'SLACK_BOT_TOKEN not configured' };
   const res = await fetchWithTimeout('https://slack.com/api/chat.postMessage', {
@@ -139,7 +139,7 @@ async function postSlackDM(slack_user_id, text) {
       'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
       'Content-Type': 'application/json; charset=utf-8',
     },
-    body: JSON.stringify({ channel: slack_user_id, text }),
+    body: JSON.stringify({ channel: slack_user_id, text, mrkdwn: false }),
   });
   const data = await res.json().catch(() => ({}));
   if (!data.ok) console.error('[slack-dm] postMessage failed:', data.error);
@@ -475,6 +475,9 @@ app.post('/api/notifications/enable', wrap(async (req, res) => {
   if (!refresh_token || !slack_user_id || !vehicle_id) {
     return res.status(400).json({ detail: 'refresh_token, slack_user_id, and vehicle_id are required' });
   }
+  if (!['app', 'custom'].includes(oauth_mode)) {
+    return res.status(400).json({ detail: 'oauth_mode must be "app" or "custom"' });
+  }
   if (oauth_mode === 'custom' && !client_id) {
     return res.status(400).json({ detail: 'custom oauth requires client_id' });
   }
@@ -537,13 +540,14 @@ app.get('/api/notifications/status', (req, res) => {
 // filters days_until_next ∈ {1,2,3} anyway, never sweep-day.
 function bearerOk(authHeader, token) {
   if (!token) return false;
-  const expected = `Bearer ${token}`;
-  if (authHeader.length !== expected.length) return false;
-  return timingSafeEqual(Buffer.from(authHeader), Buffer.from(expected));
+  const givenBuf = Buffer.from(authHeader);
+  const expectedBuf = Buffer.from(`Bearer ${token}`);
+  // timingSafeEqual throws on mismatched byte length, so gate on
+  // byte-length first (.length on a string is char count, not bytes).
+  if (givenBuf.length !== expectedBuf.length) return false;
+  return timingSafeEqual(givenBuf, expectedBuf);
 }
 
-// Format an outbound move-your-car DM. Lead with vehicle + day count,
-// follow with date/time/side, address, and a link back to the SPA.
 function formatSweepDM(out) {
   const days = out.days_until_next;
   const event = out.next_event || {};
@@ -559,9 +563,8 @@ function formatSweepDM(out) {
   ].join('\n');
 }
 
-// Decide whether a /run result warrants a DM. Filter on T-3/T-2/T-1
-// AND only when the upcoming sweep covers the user's parked side
-// (or both sides) — no point pinging on a sweep that misses.
+// Skip DM when the sweep covers a side opposite the user's parked side
+// — no point pinging if they don't have to move.
 function shouldNotifySweep(out) {
   if (!out.ok || !out.found) return false;
   if (![1, 2, 3].includes(out.days_until_next)) return false;
@@ -571,58 +574,69 @@ function shouldNotifySweep(out) {
   return out.car_side === eventSide;
 }
 
+// Single-flight guard. Both the in-process cron and the HTTP /run
+// endpoint call runNotifications; without this, two concurrent loads
+// would fight on the rotated refresh_token rename and brick a sub.
+let runningNotifications = null;
 async function runNotifications() {
-  const subs = loadSubs();
-  const results = [];
-  for (const sub of subs) {
-    const out = { sub_id: sub.id, slack_user_id: sub.slack_user_id, vehicle_id: sub.vehicle_id, vehicle_name: sub.vehicle_name };
-    try {
-      const rotated = await teslaTokenExchange(buildRefreshParams(sub.oauth_mode, sub.refresh_token, sub.client_id));
-      // Tesla rotates refresh_tokens — persist the new one immediately
-      // so a later iteration crash doesn't lose it (next run's stale
-      // token would 401 and brick the sub).
-      if (rotated.refresh_token && rotated.refresh_token !== sub.refresh_token) {
-        sub.refresh_token = rotated.refresh_token;
-        saveSubs(subs);
+  if (runningNotifications) return runningNotifications;
+  runningNotifications = (async () => {
+    const store = loadStore();
+    const subs = store.subscriptions || [];
+    const results = [];
+    for (const sub of subs) {
+      const out = { sub_id: sub.id, slack_user_id: sub.slack_user_id, vehicle_id: sub.vehicle_id, vehicle_name: sub.vehicle_name };
+      try {
+        const rotated = await teslaTokenExchange(buildRefreshParams(sub.oauth_mode, sub.refresh_token, sub.client_id));
+        // Tesla rotates refresh_tokens on each exchange; persist the
+        // new one immediately so a crash later in the loop doesn't
+        // leave us with a now-revoked token on the next run.
+        if (rotated.refresh_token && rotated.refresh_token !== sub.refresh_token) {
+          sub.refresh_token = rotated.refresh_token;
+          saveStore(store);
+        }
+        const headers = { Authorization: `Bearer ${rotated.access_token}`, 'Content-Type': 'application/json' };
+
+        const locData = await fetchVehicleData(headers, sub.vehicle_id);
+        const { latitude, longitude } = locData.response?.drive_state || {};
+        if (latitude == null || longitude == null) throw new Error('No vehicle location');
+        out.battery_level = locData.response?.charge_state?.battery_level ?? null;
+
+        const geo = await reverseGeocodeLocation(latitude, longitude);
+        const addr = [geo.house_number, geo.street].filter(Boolean).join(' ');
+        out.address = geo.display_name || addr;
+        if (!addr) throw new Error('No street resolved from coordinates');
+
+        const sweep = await runSweepCheck({ address: addr, today_date: new Date().toISOString().slice(0, 10) });
+        out.found = !!sweep.found;
+        out.days_until_next = sweep.days_until_next ?? null;
+        out.status = sweep.status || null;
+        out.title = sweep.title || null;
+        out.message = sweep.message || null;
+        out.car_side = sweep.car_side || null;
+        out.next_event = sweep.sweep_events?.[0] || null;
+        out.ok = true;
+      } catch (e) {
+        out.ok = false;
+        out.error = e.message;
       }
-      const headers = { Authorization: `Bearer ${rotated.access_token}`, 'Content-Type': 'application/json' };
-
-      const locData = await fetchVehicleData(headers, sub.vehicle_id);
-      const { latitude, longitude } = locData.response?.drive_state || {};
-      if (latitude == null || longitude == null) throw new Error('No vehicle location');
-      out.battery_level = locData.response?.charge_state?.battery_level ?? null;
-
-      const geo = await reverseGeocodeLocation(latitude, longitude);
-      const addr = [geo.house_number, geo.street].filter(Boolean).join(' ');
-      out.address = geo.display_name || addr;
-      if (!addr) throw new Error('No street resolved from coordinates');
-
-      const sweep = await runSweepCheck({ address: addr, today_date: new Date().toISOString().slice(0, 10) });
-      out.found = !!sweep.found;
-      out.days_until_next = sweep.days_until_next ?? null;
-      out.status = sweep.status || null;
-      out.title = sweep.title || null;
-      out.message = sweep.message || null;
-      out.car_side = sweep.car_side || null;
-      out.next_event = sweep.sweep_events?.[0] || null;
-      out.ok = true;
-    } catch (e) {
-      out.ok = false;
-      out.error = e.message;
+      sub.last_check_at = new Date().toISOString();
+      sub.last_result = { ok: out.ok, days_until_next: out.days_until_next, error: out.error };
+      results.push(out);
     }
-    sub.last_check_at = new Date().toISOString();
-    sub.last_result = { ok: out.ok, days_until_next: out.days_until_next, error: out.error };
-    results.push(out);
-  }
-  if (subs.length) saveSubs(subs);
-  for (const out of results) {
-    if (!shouldNotifySweep(out)) continue;
-    const dm = await postSlackDM(out.slack_user_id, formatSweepDM(out));
-    out.dm_sent = dm.ok;
-    out.dm_error = dm.error || null;
-  }
-  setLastRunAt(new Date().toISOString());
-  return { ran_at: new Date().toISOString(), results };
+    for (const out of results) {
+      if (!shouldNotifySweep(out)) continue;
+      const dm = await postSlackDM(out.slack_user_id, formatSweepDM(out));
+      out.dm_sent = dm.ok;
+      out.dm_error = dm.error || null;
+    }
+    // Only mark "ran today" if at least one sub processed successfully.
+    // A total-outage day shouldn't suppress tomorrow's missed-run recovery.
+    if (results.some(r => r.ok)) store.last_run_at = new Date().toISOString();
+    saveStore(store);
+    return { ran_at: new Date().toISOString(), results };
+  })().finally(() => { runningNotifications = null; });
+  return runningNotifications;
 }
 
 // Manual trigger / monitoring endpoint. Same logic the in-process
@@ -648,7 +662,12 @@ process.on('unhandledRejection', (e) => console.error('Unhandled rejection:', e)
 function startNotificationCron() {
   cron.schedule('0 12 * * *', () => {
     console.log('[cron] firing daily notification run');
-    runNotifications().catch(e => console.error('[cron] runNotifications failed:', e.message));
+    runNotifications()
+      .then(r => {
+        const dms = r.results.filter(o => o.dm_sent).length;
+        console.log(`[cron] ran ${r.results.length} sub(s), sent ${dms} DM(s)`);
+      })
+      .catch(e => console.error('[cron] runNotifications failed:', e));
   }, { timezone: 'America/New_York' });
 }
 
@@ -666,7 +685,7 @@ function maybeRecoverMissedRun() {
   const lastDateET = last ? fmtDate.format(new Date(last)) : null;
   if (lastDateET === todayET) return;
   console.log(`[cron] recovering missed run (last: ${lastDateET || 'never'}, today: ${todayET})`);
-  runNotifications().catch(e => console.error('[cron] missed-run recovery failed:', e.message));
+  runNotifications().catch(e => console.error('[cron] missed-run recovery failed:', e));
 }
 
 const PORT = process.env.PORT || 20040;
