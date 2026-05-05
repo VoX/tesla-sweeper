@@ -1,8 +1,23 @@
 import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
+import preact from '@preact/preset-vite';
+
+// Vite injects <script type="module"> before <link rel="stylesheet">,
+// which triggers Firefox's "Layout was forced before stylesheets
+// loaded" warning when the bundle starts reading layout (Leaflet's
+// map-init does this). Move stylesheet links above script tags.
+const cssBeforeScript = {
+  name: 'css-before-script',
+  transformIndexHtml(html) {
+    const links = [...html.matchAll(/<link[^>]+rel=["']stylesheet["'][^>]*>/g)].map(m => m[0]);
+    if (!links.length) return html;
+    let stripped = html;
+    for (const l of links) stripped = stripped.replace(l, '');
+    return stripped.replace(/(\s*)<script\s+type="module"/, `$1${links.join('$1')}$1<script type="module"`);
+  },
+};
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [preact(), cssBeforeScript],
   base: '/sweeper/',
   server: {
     port: 5173,
