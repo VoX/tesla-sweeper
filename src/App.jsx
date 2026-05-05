@@ -310,6 +310,14 @@ export default function App() {
     if (['address', 'app', 'test'].includes(p)) return p;
     return new URLSearchParams(window.location.search).get('address') ? 'address' : 'app';
   });
+  // Persist active tab to URL — refresh/share preserves the view.
+  // Drop ?tab=app since it's the default; keeps URLs clean.
+  useEffect(() => {
+    const url = new URL(window.location);
+    if (tab === 'app') url.searchParams.delete('tab');
+    else url.searchParams.set('tab', tab);
+    window.history.replaceState({}, '', url);
+  }, [tab]);
   const [loading, setLoading] = useState(false);
   // Sub-message shown under the loading state. Used to surface
   // "your car is asleep, waking it" after the first few seconds —
@@ -640,7 +648,11 @@ export default function App() {
     const state = params.get('state');
     if (!code) return;
 
-    window.history.replaceState({}, '', window.location.pathname);
+    // Strip just the OAuth params, preserve user-meaningful ones (tab, address).
+    const cleaned = new URL(window.location);
+    cleaned.searchParams.delete('code');
+    cleaned.searchParams.delete('state');
+    window.history.replaceState({}, '', cleaned);
 
     const slackState = sessionStorage.getItem('slack_oauth_state');
     const teslaState = sessionStorage.getItem('tesla_oauth_state');
