@@ -87,7 +87,7 @@ function saveStore(store) {
 function loadSubs() { return loadStore().subscriptions || []; }
 function saveSubs(subs) { const s = loadStore(); s.subscriptions = subs; saveStore(s); }
 function publicSub(s) {
-  return { id: s.id, slack_user_id: s.slack_user_id, vehicle_name: s.vehicle_name, vehicle_id: s.vehicle_id, oauth_mode: s.oauth_mode, created_at: s.created_at, last_check_at: s.last_check_at };
+  return { id: s.id, slack_user_id: s.slack_user_id, vehicle_name: s.vehicle_name, vehicle_id: s.vehicle_id, created_at: s.created_at, last_check_at: s.last_check_at };
 }
 
 // Wake an asleep vehicle and poll until it reports online. Returns
@@ -133,9 +133,8 @@ async function teslaTokenExchange(params) {
   return r.json();
 }
 
-function buildRefreshParams(oauth_mode, refresh_token, client_id) {
-  const id = oauth_mode === 'app' ? TESLA_APP_CLIENT_ID : client_id;
-  return { grant_type: 'refresh_token', client_id: id, refresh_token };
+function refreshParams(refresh_token) {
+  return { grant_type: 'refresh_token', client_id: TESLA_APP_CLIENT_ID, refresh_token };
 }
 
 // Post a Slack DM via chat.postMessage. mrkdwn:false defangs any
@@ -579,48 +578,6 @@ app.post('/api/oauth/app/refresh', wrap(async (req, res) => {
   res.json({ access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in });
 }));
 
-// Custom OAuth — user provides their own credentials
-app.post('/api/oauth/start', wrap(async (req, res) => {
-  const { client_id, client_secret, redirect_uri, register = false, scope = 'openid offline_access vehicle_device_data vehicle_location' } = req.body;
-
-  if (register) {
-    try {
-      const partnerToken = await teslaTokenExchange({
-        grant_type: 'client_credentials', client_id, client_secret,
-        scope: 'openid vehicle_device_data vehicle_location',
-        audience: TESLA_BASE,
-      });
-      await fetchWithTimeout(`${TESLA_BASE}/api/1/partner_accounts`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${partnerToken.access_token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ domain: 'claw.bitvox.me' }),
-      });
-      await new Promise(r => setTimeout(r, 3000));
-    } catch (e) {
-      console.error('Partner registration failed:', e.message);
-    }
-  }
-
-  const state = randomBytes(32).toString('base64url');
-  const params = new URLSearchParams({ response_type: 'code', client_id, redirect_uri, scope, state, prompt: 'login', locale: 'en-US' });
-  res.json({ url: `https://auth.tesla.com/oauth2/v3/authorize?${params}`, state });
-}));
-
-app.post('/api/oauth/callback', wrap(async (req, res) => {
-  const { client_id, client_secret, redirect_uri, code } = req.body;
-  const data = await teslaTokenExchange({
-    grant_type: 'authorization_code', client_id, client_secret, code, redirect_uri,
-    audience: TESLA_BASE,
-  });
-  res.json({ access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in, token_type: data.token_type });
-}));
-
-app.post('/api/oauth/refresh', wrap(async (req, res) => {
-  const { client_id, refresh_token } = req.body;
-  const data = await teslaTokenExchange({ grant_type: 'refresh_token', client_id, refresh_token });
-  res.json({ access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in });
-}));
-
 // "Sign in with Slack" — OIDC flow so users can subscribe to
 // notifications without hunting for their member id.
 app.post('/api/slack/oauth/start', (req, res) => {
@@ -669,15 +626,9 @@ app.post('/api/slack/oauth/callback', wrap(async (req, res) => {
 // refresh_token server-side so a 12pm ET cron can wake the car, check
 // the sweeping schedule, and DM via Slack on T-3/T-2/T-1.
 app.post('/api/notifications/enable', wrap(async (req, res) => {
-  const { refresh_token, oauth_mode = 'app', client_id, vehicle_id, vehicle_name, slack_user_id } = req.body;
+  const { refresh_token, vehicle_id, vehicle_name, slack_user_id } = req.body;
   if (!refresh_token || !slack_user_id || !vehicle_id) {
     return res.status(400).json({ detail: 'refresh_token, slack_user_id, and vehicle_id are required' });
-  }
-  if (!['app', 'custom'].includes(oauth_mode)) {
-    return res.status(400).json({ detail: 'oauth_mode must be "app" or "custom"' });
-  }
-  if (oauth_mode === 'custom' && !client_id) {
-    return res.status(400).json({ detail: 'custom oauth requires client_id' });
   }
   if (!SLACK_USER_ID_RE.test(slack_user_id)) {
     return res.status(400).json({ detail: 'slack_user_id should look like U060NLFUM' });
@@ -686,7 +637,7 @@ app.post('/api/notifications/enable', wrap(async (req, res) => {
   // and revoked tokens before we persist garbage.
   let rotated;
   try {
-    rotated = await teslaTokenExchange(buildRefreshParams(oauth_mode, refresh_token, client_id));
+    rotated = await teslaTokenExchange(refreshParams(refresh_token));
   } catch (e) {
     return res.status(400).json({ detail: 'Refresh token invalid: ' + e.message });
   }
@@ -711,8 +662,6 @@ app.post('/api/notifications/enable', wrap(async (req, res) => {
     slack_user_id,
     vehicle_id,
     vehicle_name: vehicle_name || 'Unknown',
-    oauth_mode,
-    client_id: oauth_mode === 'custom' ? client_id : null,
     refresh_token: rotated.refresh_token || refresh_token,
     created_at: new Date().toISOString(),
     last_check_at: null,
@@ -803,7 +752,7 @@ async function runNotifications() {
     for (const sub of subs) {
       const out = { sub_id: sub.id, slack_user_id: sub.slack_user_id, vehicle_id: sub.vehicle_id, vehicle_name: sub.vehicle_name };
       try {
-        const rotated = await teslaTokenExchange(buildRefreshParams(sub.oauth_mode, sub.refresh_token, sub.client_id));
+        const rotated = await teslaTokenExchange(refreshParams(sub.refresh_token));
         // Tesla rotates refresh_tokens on each exchange; persist
         // immediately so a crash later in the loop doesn't leave us
         // with a now-revoked token next run.

@@ -311,7 +311,7 @@ function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis, notif
 export default function App() {
   const [tab, setTab] = useState(() => {
     const p = new URLSearchParams(window.location.search).get('tab');
-    if (['address', 'app', 'oauth'].includes(p)) return p;
+    if (['address', 'app', 'test'].includes(p)) return p;
     return new URLSearchParams(window.location.search).get('address') ? 'address' : 'app';
   });
   const [loading, setLoading] = useState(false);
@@ -337,10 +337,6 @@ export default function App() {
 
   const [address, setAddress] = useState(() => new URLSearchParams(window.location.search).get('address') || '');
   const autoLookupDone = useRef(false);
-  const [clientId, setClientId] = useState('');
-  const [clientSecret, setClientSecret] = useState('');
-  const [redirectUri, setRedirectUri] = useState(() => window.location.href.split('?')[0].split('#')[0]);
-  const [registerPartner, setRegisterPartner] = useState(false);
 
   const [slackUserId, setSlackUserId] = useState(() => localStorage.getItem('tesla_slack_user_id') || '');
   const [subscriptions, setSubscriptions] = useState(null);
@@ -436,8 +432,6 @@ export default function App() {
       const veh = vehicles.find(v => v.id === vid);
       const data = await post('notifications/enable', {
         refresh_token: tokens.refresh_token,
-        oauth_mode: tokens.oauth_mode,
-        client_id: tokens.client_id,
         vehicle_id: vid,
         vehicle_name: veh?.name || 'Unknown',
         slack_user_id: slackUserId,
@@ -482,11 +476,7 @@ export default function App() {
     if (refreshPromise.current) return refreshPromise.current;
     refreshPromise.current = (async () => {
       try {
-        const refreshUrl = tokens.oauth_mode === 'app' ? 'oauth/app/refresh' : 'oauth/refresh';
-        const refreshBody = tokens.oauth_mode === 'app'
-          ? { refresh_token: tokens.refresh_token }
-          : { client_id: tokens.client_id, refresh_token: tokens.refresh_token };
-        const data = await post(refreshUrl, refreshBody);
+        const data = await post('oauth/app/refresh', { refresh_token: tokens.refresh_token });
         const newTokens = {
           ...tokens,
           access_token: data.access_token,
@@ -622,31 +612,12 @@ export default function App() {
     }
   };
 
-  const handleOAuthStart = async () => {
-    if (!clientId || !clientSecret) { setError('Client ID and Secret are required'); return; }
-    sessionStorage.setItem('tesla_client_id', clientId);
-    sessionStorage.setItem('tesla_client_secret', clientSecret);
-    sessionStorage.setItem('tesla_redirect_uri', redirectUri);
-    setLoading(true);
-    setOauthStatus(registerPartner ? 'Registering with Tesla Fleet API...' : 'Redirecting to Tesla...');
-    try {
-      const data = await post('oauth/start', { client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri, register: registerPartner });
-      sessionStorage.setItem('tesla_oauth_state', data.state);
-      window.location.href = data.url;
-    } catch (e) {
-      setError('Failed to start OAuth: ' + e.message);
-      setLoading(false);
-      setOauthStatus('');
-    }
-  };
-
   const handleAppOAuthStart = async () => {
     setLoading(true);
     setOauthStatus('Redirecting to Tesla...');
     try {
       const data = await post('oauth/app/start', {});
       sessionStorage.setItem('tesla_oauth_state', data.state);
-      sessionStorage.setItem('tesla_oauth_mode', 'app');
       window.location.href = data.url;
     } catch (e) {
       setError('Failed to start OAuth: ' + e.message);
@@ -703,30 +674,13 @@ export default function App() {
       return;
     }
 
-    const mode = sessionStorage.getItem('tesla_oauth_mode') || 'custom';
-    const isApp = mode === 'app';
-
     setOauthStatus('Exchanging code for token...');
     setLoading(true);
-    setTab(isApp ? 'app' : 'oauth');
+    setTab('app');
 
-    const callbackUrl = isApp ? 'oauth/app/callback' : 'oauth/callback';
-    const callbackBody = isApp
-      ? { code }
-      : (() => {
-          const cId = sessionStorage.getItem('tesla_client_id');
-          const cSecret = sessionStorage.getItem('tesla_client_secret');
-          const rUri = sessionStorage.getItem('tesla_redirect_uri');
-          if (!cId || !cSecret) { setError('Missing OAuth credentials. Start the flow again.'); setLoading(false); return null; }
-          return { client_id: cId, client_secret: cSecret, redirect_uri: rUri, code };
-        })();
-
-    if (!callbackBody) return;
-
-    post(callbackUrl, callbackBody)
+    post('oauth/app/callback', { code })
       .then(async (data) => {
-        const tokenClientId = isApp ? 'app' : sessionStorage.getItem('tesla_client_id');
-        setTokens({ access_token: data.access_token, refresh_token: data.refresh_token, client_id: tokenClientId, oauth_mode: mode, expires_at: Date.now() + data.expires_in * 1000 });
+        setTokens({ access_token: data.access_token, refresh_token: data.refresh_token, expires_at: Date.now() + data.expires_in * 1000 });
         setOauthStatus('\u2705 Connected! Loading vehicles...');
         const vlist = await fetchVehicles(data.access_token);
         if (vlist.length === 0) {
@@ -749,7 +703,7 @@ export default function App() {
       })
       .catch(e => setOauthStatus('\u274C ' + e.message))
       .finally(() => {
-        ['tesla_client_id', 'tesla_client_secret', 'tesla_redirect_uri', 'tesla_oauth_state'].forEach(k => sessionStorage.removeItem(k));
+        sessionStorage.removeItem('tesla_oauth_state');
         setLoading(false);
       });
   }, []);
@@ -766,7 +720,6 @@ export default function App() {
   const tabs = [
     { id: 'address', icon: '\uD83D\uDCCD', label: 'Address' },
     { id: 'app', icon: '\uD83D\uDE97', label: 'Tesla Login' },
-    { id: 'oauth', icon: '\uD83D\uDD10', label: 'Custom OAuth' },
     { id: 'test', icon: '\uD83E\uDDEA', label: 'Test Side' },
   ];
 
@@ -838,43 +791,6 @@ export default function App() {
               {oauthStatus && <div className="oauth-status">{oauthStatus}</div>}
             </>
           )}
-        </div>
-      )}
-
-      {tab === 'oauth' && (
-        <div role="tabpanel">
-          {tokens ? (
-            <>
-              <div className="oauth-status">{oauthStatus || '\u2705 Connected'}</div>
-              <button onClick={handleCheckCar} disabled={loading}>{loading ? (waking ? 'Waking your car... (up to 60s)' : 'Checking...') : 'Check My Car'}</button>
-              <button className="disconnect-btn" onClick={logout}>Disconnect</button>
-            </>
-          ) : (
-            <>
-              <div className="oauth-instructions">
-                <p>Use your own Tesla developer app credentials:</p>
-                <ol>
-                  <li>Go to <a href="https://developer.tesla.com/dashboard" target="_blank" rel="noopener">developer.tesla.com/dashboard</a></li>
-                  <li>Create an application (or use an existing one)</li>
-                  <li>Enable scopes: <strong>Vehicle Information</strong> and <strong>Vehicle Location</strong></li>
-                  <li>Copy your <strong>Client ID</strong> and <strong>Client Secret</strong></li>
-                  <li>Add <code>{redirectUri}</code> as an allowed Redirect URI in your app settings</li>
-                </ol>
-              </div>
-              <label htmlFor="oauth-client-id">Tesla App Client ID</label>
-              <input id="oauth-client-id" placeholder="From developer.tesla.com" value={clientId} onChange={e => setClientId(e.target.value)} />
-              <label htmlFor="oauth-client-secret">Client Secret</label>
-              <input id="oauth-client-secret" type="password" placeholder="Your app's client secret" value={clientSecret} onChange={e => setClientSecret(e.target.value)} />
-              <label htmlFor="oauth-redirect">Redirect URI</label>
-              <input id="oauth-redirect" placeholder="e.g. https://claw.bitvox.me/sweeper/" value={redirectUri} onChange={e => setRedirectUri(e.target.value)} />
-              <label className="checkbox-label">
-                <input type="checkbox" checked={registerPartner} onChange={e => setRegisterPartner(e.target.checked)} />
-                Register app with Tesla Fleet API (first-time setup)
-              </label>
-              <button onClick={handleOAuthStart} disabled={loading}>{loading ? 'Connecting...' : 'Connect Tesla Account'}</button>
-            </>
-          )}
-          {!tokens && oauthStatus && <div className="oauth-status">{oauthStatus}</div>}
         </div>
       )}
 
