@@ -809,8 +809,10 @@ export default function App() {
           <button className="error-dismiss" onClick={() => setError('')}>&times;</button>
         </div>
       )}
-      <MapView lat={mapPos?.lat} lng={mapPos?.lng} street={mapPos?.street} />
-      <SweepResults data={sweepData} vehicleName={vehicleInfo?.name} fullAddr={vehicleInfo?.addr} lat={mapPos?.lat} lng={mapPos?.lng} />
+      {(tab === 'address' || tab === 'app') && <>
+        <MapView lat={mapPos?.lat} lng={mapPos?.lng} street={mapPos?.street} />
+        <SweepResults data={sweepData} vehicleName={vehicleInfo?.name} fullAddr={vehicleInfo?.addr} lat={mapPos?.lat} lng={mapPos?.lng} />
+      </>}
 
       <footer>
         Somerville sweeping: Apr 1 – Dec 31 &middot; Data from Recollect/City of Somerville &middot; Always check street signs
