@@ -365,13 +365,26 @@ app.post('/api/reverse-geocode', wrap(async (req, res) => {
 //   way_id, segment, debug
 // }
 async function whichSide(lat, lng) {
-  // 1. Overpass query for highway ways within 50m.
-  const q = `[out:json][timeout:10];way(around:50,${lat},${lng})[highway];out geom;`;
-  const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(q)}`;
-  const overpassRes = await fetchWithTimeout(url, { headers: { 'User-Agent': UA } }, 12000);
-  if (!overpassRes.ok) throw new Error(`Overpass ${overpassRes.status}`);
-  const opData = await overpassRes.json();
-  const ways = (opData.elements || []).filter(e => e.type === 'way' && e.geometry?.length >= 2);
+  // 1. Overpass query for *named* drivable streets within 50m. The first
+  //    pass filters out unnamed ways (sidewalks, footpaths, service drives,
+  //    driveways) which OSM often digitizes parallel to the real street and
+  //    which would otherwise win the closest-segment race when the pin is
+  //    near a curb. If nothing named comes back, retry with the looser
+  //    filter so we still get *something* for streets OSM under-tags.
+  const drivableHighways = '^(residential|primary|secondary|tertiary|unclassified|living_street|trunk|motorway|primary_link|secondary_link|tertiary_link|trunk_link|motorway_link)$';
+  const namedQ = `[out:json][timeout:10];way(around:50,${lat},${lng})[highway~"${drivableHighways}"][name];out geom;`;
+  const looseQ = `[out:json][timeout:10];way(around:50,${lat},${lng})[highway~"${drivableHighways}"];out geom;`;
+
+  async function fetchWays(q) {
+    const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(q)}`;
+    const r = await fetchWithTimeout(url, { headers: { 'User-Agent': UA } }, 12000);
+    if (!r.ok) throw new Error(`Overpass ${r.status}`);
+    const j = await r.json();
+    return (j.elements || []).filter(e => e.type === 'way' && e.geometry?.length >= 2);
+  }
+
+  let ways = await fetchWays(namedQ);
+  if (!ways.length) ways = await fetchWays(looseQ);
   if (!ways.length) return { side: 'unknown', error: 'no nearby roads in OSM' };
 
   // 2. Find closest segment across all ways. OSM returns nodes as
@@ -405,21 +418,46 @@ async function whichSide(lat, lng) {
   // Unit perpendicular (rotated 90° CCW): (-dy, dx)
   const perpLng = -segDy / segLen;
   const perpLat = segDx / segLen;
-  // Offset by ~10m on each side.
+  // Try several probe distances — at large distances the perpendicular can
+  // jump to a parallel street's house numbers (e.g. cross-streets). Small
+  // distances reduce that risk but can fail to escape the curb itself.
+  // Probe at 4m, 6m, 8m and pick the first result on each side that
+  // matches the chosen way's name.
   const metersPerDegLat = 111000;
   const metersPerDegLng = 111000 * Math.cos(lat * Math.PI / 180);
-  const offsetDeg = 10; // meters, applied scaled below
-  const stepLat = (perpLat * offsetDeg) / metersPerDegLat;
-  const stepLng = (perpLng * offsetDeg) / metersPerDegLng;
-  const leftPoint  = { lat: best.foot.lat + stepLat, lng: best.foot.lng + stepLng };
-  const rightPoint = { lat: best.foot.lat - stepLat, lng: best.foot.lng - stepLng };
+  const wayName = (best.way.tags?.name || '').toLowerCase();
 
-  let leftAddr = null, rightAddr = null;
-  try { leftAddr  = await reverseGeocodeLocation(leftPoint.lat,  leftPoint.lng); } catch {}
-  try { rightAddr = await reverseGeocodeLocation(rightPoint.lat, rightPoint.lng); } catch {}
+  async function probeAt(meters, sign /* +1 = left, -1 = right */) {
+    const stepLat = (perpLat * meters * sign) / metersPerDegLat;
+    const stepLng = (perpLng * meters * sign) / metersPerDegLng;
+    const pt = { lat: best.foot.lat + stepLat, lng: best.foot.lng + stepLng };
+    let addr = null;
+    try { addr = await reverseGeocodeLocation(pt.lat, pt.lng); } catch {}
+    return { pt, addr };
+  }
+
+  // First probe at the natural 6m, then expand if we don't get a same-street hit.
+  const probeDistances = [6, 4, 8, 10];
+  let leftProbe = null, rightProbe = null;
+  for (const d of probeDistances) {
+    if (!leftProbe || (leftProbe.addr?.street || '').toLowerCase() !== wayName) {
+      leftProbe = await probeAt(d, +1);
+    }
+    if (!rightProbe || (rightProbe.addr?.street || '').toLowerCase() !== wayName) {
+      rightProbe = await probeAt(d, -1);
+    }
+    const leftMatches = (leftProbe?.addr?.street || '').toLowerCase() === wayName;
+    const rightMatches = (rightProbe?.addr?.street || '').toLowerCase() === wayName;
+    if (leftMatches && rightMatches) break;
+  }
+  const leftPoint = leftProbe?.pt || { lat: null, lng: null };
+  const rightPoint = rightProbe?.pt || { lat: null, lng: null };
+  const leftAddr = leftProbe?.addr || null;
+  const rightAddr = rightProbe?.addr || null;
 
   const parseHouse = (a) => {
     if (!a?.house_number) return null;
+    if (wayName && (a.street || '').toLowerCase() !== wayName) return null;
     const m = String(a.house_number).match(/(\d+)/);
     return m ? parseInt(m[1], 10) : null;
   };
