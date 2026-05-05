@@ -219,14 +219,13 @@ async function runSweepCheck({ address, today_date, past_noon = false, lat, lng 
   const houseMatch = address.trim().match(/^(\d+)/);
   const houseNum = houseMatch ? parseInt(houseMatch[1]) : null;
 
-  // Prefer OSM-derived geometric side detection when coordinates are
-  // available — the houseNum % 2 heuristic breaks when a car parks
-  // across from its own address (no opposing house, oversized lots).
-  // Fall back to parity if OSM lacks building data for the street or
-  // the lookup fails.
+  // OSM-based geometric detection beats houseNum%2 when a car parks
+  // across from its own address. Fall back to parity if OSM lacks
+  // building data on the street or the lookup throws.
   let carSide = null;
   let sideSource = null;
-  if (typeof lat === 'number' && typeof lng === 'number') {
+  const haveCoords = typeof lat === 'number' && typeof lng === 'number';
+  if (haveCoords) {
     try {
       const ws = await whichSide(lat, lng);
       if (ws.side === 'odd' || ws.side === 'even') {
@@ -234,12 +233,16 @@ async function runSweepCheck({ address, today_date, past_noon = false, lat, lng 
         sideSource = 'osm';
       }
     } catch (e) {
-      console.warn('[sweep-check] whichSide failed:', e.message);
+      console.warn('[sweep-check] whichSide threw:', e.message);
     }
   }
   if (!carSide && houseNum) {
     carSide = houseNum % 2 === 0 ? 'even' : 'odd';
     sideSource = 'house_parity';
+    // Visible signal in journalctl when OSM detection didn't yield a
+    // side despite having coords — operators can grep for [fallback]
+    // to gauge how often the heuristic is carrying the result.
+    if (haveCoords) console.warn(`[sweep-check] [fallback] OSM no-data, using parity for #${houseNum} → ${carSide}`);
   }
 
   const sweepingToday = sweepEvents.filter(e => e.date === todayStr);
@@ -282,19 +285,22 @@ async function runSweepCheck({ address, today_date, past_noon = false, lat, lng 
     message = 'No sweeping events found in the next 30 days.';
   }
 
-  // Forward-geocode the matched address for the map. Best-effort —
-  // sweep result still returns even if the geocode fails.
-  let latitude = null, longitude = null;
-  try {
-    const geoRes = await nominatimFetch(
-      `${NOMINATIM_BASE}/search?${new URLSearchParams({ q: (place.name || address) + ', Somerville, MA', format: 'jsonv2', limit: 1 })}`,
-      { headers: { 'User-Agent': UA } }
-    );
-    if (geoRes.ok) {
-      const results = await geoRes.json();
-      if (results.length) { latitude = parseFloat(results[0].lat); longitude = parseFloat(results[0].lon); }
-    }
-  } catch {}
+  // Caller already supplied coords (cron, web-from-car-location) — echo
+  // them back. Otherwise forward-geocode for the map.
+  let latitude = haveCoords ? lat : null;
+  let longitude = haveCoords ? lng : null;
+  if (!haveCoords) {
+    try {
+      const geoRes = await nominatimFetch(
+        `${NOMINATIM_BASE}/search?${new URLSearchParams({ q: (place.name || address) + ', Somerville, MA', format: 'jsonv2', limit: 1 })}`,
+        { headers: { 'User-Agent': UA } }
+      );
+      if (geoRes.ok) {
+        const results = await geoRes.json();
+        if (results.length) { latitude = parseFloat(results[0].lat); longitude = parseFloat(results[0].lon); }
+      }
+    } catch {}
+  }
 
   return {
     found: true,
@@ -372,85 +378,58 @@ app.post('/api/reverse-geocode', wrap(async (req, res) => {
   res.json(await reverseGeocodeLocation(lat, lng));
 }));
 
-// Determine which curb (odd / even side) a given lat/lng is parked on.
-// Uses OSM Overpass to fetch nearby road geometry, finds the closest road
-// segment, computes cross-product sign to know left/right of travel
-// direction, then probes reverse-geocode at perpendicular offset points to
-// see which side carries odd vs even house numbers.
-//
-// Body: { lat, lng }
-// Returns: {
-//   side: "odd" | "even" | "unknown",
-//   road_name: string,
-//   perpendicular_offset_m: number,
-//   cross_sign: -1 | 0 | +1,            // sign of the cross product (debug)
-//   probes: { left: {...}, right: {...} },
-//   way_id, segment, debug
-// }
+// whichSide(lat, lng) — geometric "which curb" detection.
+// Picks the closest named drivable highway segment to the pin, takes the
+// 2D cross-product sign to know which side of A→B the pin is on, then
+// queries OSM buildings tagged addr:street=<road> and tallies even-vs-
+// odd house numbers per side to map cross sign → odd/even parity.
+// Beats houseNum%2 when a car parks across from its own address.
 async function whichSide(lat, lng) {
-  // 1. Overpass query for *named* drivable streets within 50m. The first
-  //    pass filters out unnamed ways (sidewalks, footpaths, service drives,
-  //    driveways) which OSM often digitizes parallel to the real street and
-  //    which would otherwise win the closest-segment race when the pin is
-  //    near a curb. If nothing named comes back, retry with the looser
-  //    filter so we still get *something* for streets OSM under-tags.
+  // Filter to *named* drivable highways — sidewalks/footpaths digitized
+  // parallel to the real street would otherwise win the closest-segment
+  // race when the pin is near a curb.
   const drivableHighways = '^(residential|primary|secondary|tertiary|unclassified|living_street|trunk|motorway|primary_link|secondary_link|tertiary_link|trunk_link|motorway_link)$';
   const namedQ = `[out:json][timeout:10];way(around:50,${lat},${lng})[highway~"${drivableHighways}"][name];out geom;`;
-  const looseQ = `[out:json][timeout:10];way(around:50,${lat},${lng})[highway~"${drivableHighways}"];out geom;`;
 
   async function fetchWays(q) {
     const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(q)}`;
-    const r = await fetchWithTimeout(url, { headers: { 'User-Agent': UA } }, 12000);
+    const r = await fetchWithTimeout(url, { headers: { 'User-Agent': UA } });
     if (!r.ok) throw new Error(`Overpass ${r.status}`);
     const j = await r.json();
     return (j.elements || []).filter(e => e.type === 'way' && e.geometry?.length >= 2);
   }
 
-  let ways = await fetchWays(namedQ);
-  if (!ways.length) ways = await fetchWays(looseQ);
+  const ways = await fetchWays(namedQ);
   if (!ways.length) return { side: 'unknown', error: 'no nearby roads in OSM' };
 
-  // 2. Find closest segment across all ways. OSM returns nodes as
-  //    {lat, lon} — normalize to {lat, lng} so the rest of the code can
-  //    use one field name throughout.
-  const norm = (n) => ({ lat: n.lat, lng: n.lng != null ? n.lng : n.lon });
+  // Overpass `out geom` returns {lat, lon} — inline the rename to lng.
   let best = null;
   for (const way of ways) {
-    const geom = way.geometry.map(norm);
+    const geom = way.geometry.map(n => ({ lat: n.lat, lng: n.lon }));
     for (let i = 0; i < geom.length - 1; i++) {
       const A = geom[i], B = geom[i + 1];
       const r = projectPointToSegment({ lat, lng }, A, B);
-      if (!best || r.dist < best.dist) {
-        best = { way, segIndex: i, A, B, ...r };
-      }
+      if (!best || r.dist < best.dist) best = { way, A, B, ...r };
     }
   }
   if (!best) return { side: 'unknown', error: 'no segments' };
 
-  // 3. Cross-product sign — which side of A→B direction is the point on.
   const cross = crossSign(best.A, best.B, { lat, lng });
-
-  // 4. Convert perpendicular offset to meters (haversine of foot point → car).
   const offsetM = haversineMeters(lat, lng, best.foot.lat, best.foot.lng);
 
-  // 5. Determine odd/even by querying OSM for buildings on this street and
-  //    classifying each by cross-product side. Nominatim reverse-geocode
-  //    isn't dense enough to distinguish curbs reliably (both probes can
-  //    return the same near-side house number), so we go to the source.
-  const segDx = best.B.lng - best.A.lng;
-  const segDy = best.B.lat - best.A.lat;
+  // Buildings on this street within ~80m of the foot. Nominatim reverse-
+  // geocode isn't dense enough to distinguish curbs (both perpendicular
+  // probes can return the same near-side house number), so we go to OSM.
   const wayName = best.way.tags?.name || '';
-  const wayNameLc = wayName.toLowerCase();
-
-  // Query buildings tagged with this street name within ~80m of the foot.
-  // `out tags center` gives polygon centroids without dragging full geom.
-  // Quote escaping: addr:street values can contain spaces, so wrap in quotes.
   let buildings = [];
   if (wayName) {
-    const escName = wayName.replace(/"/g, '\\"');
+    // OSM names are public-edit data — escape \ first, then ", then
+    // strip control chars so a malformed way name can't break out of
+    // the Overpass string literal.
+    const escName = wayName.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]/g, ' ');
     const bq = `[out:json][timeout:10];(way(around:80,${best.foot.lat},${best.foot.lng})["building"]["addr:street"="${escName}"];node(around:80,${best.foot.lat},${best.foot.lng})["addr:housenumber"]["addr:street"="${escName}"];);out tags center;`;
     try {
-      const r = await fetchWithTimeout(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(bq)}`, { headers: { 'User-Agent': UA } }, 12000);
+      const r = await fetchWithTimeout(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(bq)}`, { headers: { 'User-Agent': UA } });
       if (r.ok) {
         const j = await r.json();
         for (const e of j.elements || []) {
@@ -459,23 +438,16 @@ async function whichSide(lat, lng) {
           if (!c || !hn) continue;
           const m = String(hn).match(/(\d+)/);
           if (!m) continue;
-          buildings.push({
-            num: parseInt(m[1], 10),
-            lat: c.lat,
-            lng: c.lng != null ? c.lng : c.lon,
-          });
+          buildings.push({ num: parseInt(m[1], 10), lat: c.lat, lng: c.lng != null ? c.lng : c.lon });
         }
       }
     } catch {}
   }
 
-  // Classify each building by cross sign relative to A→B and aggregate
-  // parity counts per side. The side with more even-numbered buildings is
-  // the even side; the other is odd.
   let leftEven = 0, leftOdd = 0, rightEven = 0, rightOdd = 0;
   let leftBuildings = [], rightBuildings = [];
   for (const b of buildings) {
-    const s = crossSign(best.A, best.B, { lat: b.lat, lng: b.lng });
+    const s = crossSign(best.A, best.B, b);
     if (s > 0) {
       leftBuildings.push(b);
       if (b.num % 2 === 0) leftEven++; else leftOdd++;
@@ -484,39 +456,31 @@ async function whichSide(lat, lng) {
       if (b.num % 2 === 0) rightEven++; else rightOdd++;
     }
   }
-  // Decide which side is even based on majority parity.
-  let evenSideSign = null; // +1 if left of A→B is even, -1 if right of A→B is even
-  if (leftEven + rightOdd > 0 && leftEven > leftOdd && rightOdd > rightEven) evenSideSign = +1;
-  else if (leftOdd + rightEven > 0 && leftOdd > leftEven && rightEven > rightOdd) evenSideSign = -1;
-  // Edge case: only one side has data. Use that side's majority.
-  else if (leftBuildings.length && !rightBuildings.length) {
-    evenSideSign = (leftEven > leftOdd) ? +1 : -1;
-  } else if (rightBuildings.length && !leftBuildings.length) {
-    evenSideSign = (rightEven > rightOdd) ? -1 : +1;
-  }
+  // Vote-count which hypothesis fits the buildings observed: "left of
+  // A→B is the even curb" gets one vote per left-even and one per right-
+  // odd; the inverse hypothesis gets the mirror. Handles single-side-
+  // data and corner-lot mixed addressing in one expression. Tie → null.
+  const leftIsEven = leftEven + rightOdd;
+  const leftIsOdd = leftOdd + rightEven;
+  const evenSideSign = leftIsEven > leftIsOdd ? +1 : leftIsOdd > leftIsEven ? -1 : null;
 
-  // Determine the car's side parity by combining its cross sign with the
-  // even-side mapping derived from building parity.
   let side = 'unknown';
   if (evenSideSign != null && cross !== 0) {
-    const carIsOnEvenSide = (cross === evenSideSign);
-    side = carIsOnEvenSide ? 'even' : 'odd';
+    side = (cross === evenSideSign) ? 'even' : 'odd';
   }
 
-  // Pick a representative house number on each side for the response —
-  // the one nearest to the car's foot.
-  function nearest(side) {
-    if (!side.length) return null;
-    const f = best.foot;
+  // Closest building on each side — for response display.
+  const f = best.foot;
+  function nearestOf(arr) {
     let bb = null, bd = Infinity;
-    for (const b of side) {
+    for (const b of arr) {
       const d = haversineMeters(f.lat, f.lng, b.lat, b.lng);
       if (d < bd) { bd = d; bb = b; }
     }
     return bb ? bb.num : null;
   }
-  const leftRep = nearest(leftBuildings);
-  const rightRep = nearest(rightBuildings);
+  const leftRep = nearestOf(leftBuildings);
+  const rightRep = nearestOf(rightBuildings);
   let carNum = null, oppositeNum = null;
   if (cross > 0) { carNum = leftRep; oppositeNum = rightRep; }
   else if (cross < 0) { carNum = rightRep; oppositeNum = leftRep; }

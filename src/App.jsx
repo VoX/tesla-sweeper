@@ -33,11 +33,12 @@ function saveCachedCheck(vehicleId, payload) {
   } catch {}
 }
 
-async function post(url, body) {
+async function post(url, body, signal) {
   const res = await fetch(`${API}/${url}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal,
   });
   if (!res.ok) {
     const e = await res.json().catch(() => ({ detail: 'API error' }));
@@ -137,7 +138,7 @@ function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
       <div className="card">
         <h3>Details</h3>
         <Row label="Address" value={data.place_name || fullAddr || ''} />
-        {data.car_side && <Row label="Your Side" value={`${data.car_side} (#${data.house_num})`} />}
+        {data.car_side && <Row label="Your Side" value={`${data.car_side} (#${data.house_num})${data.side_source === 'osm' ? ' · OSM-verified' : data.side_source === 'house_parity' ? ' · estimated' : ''}`} />}
         {data.days_until_next != null && <Row label="Next Sweep" value={data.days_until_next === 0 ? 'Today' : data.days_until_next === 1 ? 'Tomorrow' : `In ${data.days_until_next} days`} />}
         {vehicleName && <Row label="Vehicle" value={vehicleName} />}
         {lat != null && <Row label="Coordinates" value={`${lat.toFixed(5)}, ${lng.toFixed(5)}`} />}
@@ -155,28 +156,31 @@ function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
 function TestSidePanel() {
   const mapRef = useRef(null);
   const mapInstance = useRef(null);
-  const markerRef = useRef(null);
-  const [pos, setPos] = useState({ lat: 42.385081, lng: -71.107841 }); // 9 Harvard St default
+  const inflightRef = useRef(null);
+  const [pos, setPos] = useState({ lat: 42.385081, lng: -71.107841 });
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  // Abort the in-flight probe before starting a new one — fast drags
+  // would otherwise race and the last-resolving call (not the latest
+  // pin position) wins, leaving the green segment overlay misaligned.
   const probe = useCallback(async (lat, lng) => {
+    inflightRef.current?.abort();
+    const ctrl = new AbortController();
+    inflightRef.current = ctrl;
     setLoading(true); setError('');
     try {
-      const r = await post('which-side', { lat, lng });
-      setResult(r);
-    } catch (e) { setError(e.message); setResult(null); }
-    setLoading(false);
-  }, []);
-
-  useEffect(() => () => {
-    if (mapInstance.current) { mapInstance.current.remove(); mapInstance.current = null; markerRef.current = null; }
+      const r = await post('which-side', { lat, lng }, ctrl.signal);
+      if (!ctrl.signal.aborted) setResult(r);
+    } catch (e) {
+      if (e.name !== 'AbortError') { setError(e.message); setResult(null); }
+    }
+    if (!ctrl.signal.aborted) setLoading(false);
   }, []);
 
   useEffect(() => {
-    if (!mapRef.current) return;
-    if (mapInstance.current) return; // already mounted
+    if (!mapRef.current || mapInstance.current) return;
     const m = L.map(mapRef.current).setView([pos.lat, pos.lng], 18);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(m);
     const mk = L.marker([pos.lat, pos.lng], { draggable: true }).addTo(m);
@@ -186,9 +190,9 @@ function TestSidePanel() {
       probe(ll.lat, ll.lng);
     });
     mapInstance.current = m;
-    markerRef.current = mk;
-    probe(pos.lat, pos.lng); // initial probe
-  }, [probe]);
+    probe(pos.lat, pos.lng);
+    return () => { m.remove(); mapInstance.current = null; };
+  }, []);
 
   // Draw the chosen road segment + perpendicular foot whenever result updates.
   useEffect(() => {
@@ -222,6 +226,7 @@ function TestSidePanel() {
                 {result.side?.toUpperCase() || 'UNKNOWN'}
               </strong>
             } />
+            {result.side === 'unknown' && result.error && <Row label="Reason" value={result.error} />}
             <Row label="Road" value={result.road_name} />
             <Row label="Offset from centerline" value={result.perpendicular_offset_m != null ? `${result.perpendicular_offset_m} m` : '—'} />
             <Row label="Cross sign" value={String(result.cross_sign)} />
