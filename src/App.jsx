@@ -34,28 +34,22 @@ function saveCachedCheck(vehicleId, payload) {
   } catch {}
 }
 
+async function handleRes(res) {
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({ detail: 'API error' }));
+    throw new Error(e.detail || 'API error');
+  }
+  return res.json();
+}
 async function post(url, body, signal) {
-  const res = await fetch(`${API}/${url}`, {
+  return handleRes(await fetch(`${API}/${url}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
     signal,
-  });
-  if (!res.ok) {
-    const e = await res.json().catch(() => ({ detail: 'API error' }));
-    throw new Error(e.detail || 'API error');
-  }
-  return res.json();
+  }));
 }
-
-async function get(url) {
-  const res = await fetch(`${API}/${url}`);
-  if (!res.ok) {
-    const e = await res.json().catch(() => ({ detail: 'API error' }));
-    throw new Error(e.detail || 'API error');
-  }
-  return res.json();
-}
+async function get(url) { return handleRes(await fetch(`${API}/${url}`)); }
 
 function StatusBox({ status, title, message }) {
   const icon = { danger: '\u{1F6A8}', warning: '\u26A0\uFE0F', safe: '\u2705', info: '\u2139\uFE0F' }[status] || '';
@@ -193,7 +187,11 @@ function TestSidePanel() {
     });
     mapInstance.current = m;
     probe(pos.lat, pos.lng);
-    return () => { m.remove(); mapInstance.current = null; };
+    return () => {
+      inflightRef.current?.abort();
+      m.remove();
+      mapInstance.current = null;
+    };
   }, []);
 
   // Draw the chosen road segment + perpendicular foot whenever result updates.
@@ -243,10 +241,8 @@ function TestSidePanel() {
   );
 }
 
-function clientToday() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
+// sv-SE locale formats dates as YYYY-MM-DD natively in evergreen browsers.
+function clientToday() { return new Date().toLocaleDateString('sv-SE'); }
 
 // Accept either a raw slack user id (U060NLFUM) or a pasted slack URL
 // (https://app.slack.com/team/U..., /user_profile/U..., slack://user?id=U...)
@@ -292,7 +288,7 @@ function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis, notif
               id="slack-user-id"
               placeholder="U060NLFUM or paste your slack profile URL"
               value={slackUserId}
-              onChange={e => setSlackUserId(parseSlackInput(e.target.value))}
+              onInput={e => setSlackUserId(parseSlackInput(e.target.value))}
             />
             <p style={{ fontSize: '0.75rem', color: '#8b949e', marginTop: -8, marginBottom: 12 }}>
               Find via Slack profile → ⋮ → Copy member ID.
@@ -478,7 +474,6 @@ export default function App() {
       try {
         const data = await post('oauth/app/refresh', { refresh_token: tokens.refresh_token });
         const newTokens = {
-          ...tokens,
           access_token: data.access_token,
           refresh_token: data.refresh_token || tokens.refresh_token,
           expires_at: Date.now() + data.expires_in * 1000,
@@ -612,7 +607,7 @@ export default function App() {
     }
   };
 
-  const handleAppOAuthStart = async () => {
+  const connectTesla = async () => {
     setLoading(true);
     setOauthStatus('Redirecting to Tesla...');
     try {
@@ -745,7 +740,7 @@ export default function App() {
       {tab === 'address' && (
         <div role="tabpanel">
           <label htmlFor="address">Street Address in Somerville</label>
-          <input id="address" placeholder="e.g. 11 Harvard St" value={address} onChange={e => setAddress(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleCheckAddress()} />
+          <input id="address" placeholder="e.g. 11 Harvard St" value={address} onInput={e => setAddress(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleCheckAddress()} />
           <button onClick={handleCheckAddress} disabled={loading}>{loading ? 'Checking...' : 'Check Sweeping Schedule'}</button>
         </div>
       )}
@@ -787,7 +782,7 @@ export default function App() {
           ) : (
             <>
               <p style={{fontSize: '0.85rem', color: '#8b949e', marginBottom: 16}}>Sign in with your Tesla account to locate your car and check the sweeping schedule.</p>
-              <button onClick={handleAppOAuthStart} disabled={loading}>{loading ? 'Connecting...' : 'Connect Tesla Account'}</button>
+              <button onClick={connectTesla} disabled={loading}>{loading ? 'Connecting...' : 'Connect Tesla Account'}</button>
               {oauthStatus && <div className="oauth-status">{oauthStatus}</div>}
             </>
           )}

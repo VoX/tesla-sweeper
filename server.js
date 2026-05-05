@@ -133,10 +133,6 @@ async function teslaTokenExchange(params) {
   return r.json();
 }
 
-function refreshParams(refresh_token) {
-  return { grant_type: 'refresh_token', client_id: TESLA_APP_CLIENT_ID, refresh_token };
-}
-
 // Post a Slack DM via chat.postMessage. mrkdwn:false defangs any
 // `<...>`/`*...*` chars that slipped in from user-supplied vehicle
 // names or Nominatim address strings — DMs render plain text.
@@ -400,15 +396,10 @@ async function whichSide(lat, lng) {
   const drivableHighways = '^(residential|primary|secondary|tertiary|unclassified|living_street|trunk|motorway|primary_link|secondary_link|tertiary_link|trunk_link|motorway_link)$';
   const namedQ = `[out:json][timeout:10];way(around:50,${lat},${lng})[highway~"${drivableHighways}"][name];out geom;`;
 
-  async function fetchWays(q) {
-    const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(q)}`;
-    const r = await fetchWithTimeout(url, { headers: { 'User-Agent': UA } });
-    if (!r.ok) throw new Error(`Overpass ${r.status}`);
-    const j = await r.json();
-    return (j.elements || []).filter(e => e.type === 'way' && e.geometry?.length >= 2);
-  }
-
-  const ways = await fetchWays(namedQ);
+  const overpass = (q) => fetchWithTimeout(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(q)}`, { headers: { 'User-Agent': UA } });
+  const r0 = await overpass(namedQ);
+  if (!r0.ok) throw new Error(`Overpass ${r0.status}`);
+  const ways = ((await r0.json()).elements || []).filter(e => e.type === 'way' && e.geometry?.length >= 2);
   if (!ways.length) return { side: 'unknown', error: 'no nearby roads in OSM' };
 
   // Overpass `out geom` returns {lat, lon} — inline the rename to lng.
@@ -438,7 +429,7 @@ async function whichSide(lat, lng) {
     const escName = wayName.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]/g, ' ');
     const bq = `[out:json][timeout:10];(way(around:80,${best.foot.lat},${best.foot.lng})["building"]["addr:street"="${escName}"];node(around:80,${best.foot.lat},${best.foot.lng})["addr:housenumber"]["addr:street"="${escName}"];);out tags center;`;
     try {
-      const r = await fetchWithTimeout(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(bq)}`, { headers: { 'User-Agent': UA } });
+      const r = await overpass(bq);
       if (r.ok) {
         const j = await r.json();
         for (const e of j.elements || []) {
@@ -557,7 +548,7 @@ app.post('/api/oauth/app/start', (req, res) => {
   if (!TESLA_APP_CLIENT_ID) return res.status(500).json({ detail: 'App OAuth not configured' });
   const state = randomBytes(32).toString('base64url');
   const scope = 'openid offline_access vehicle_device_data vehicle_location';
-  const params = new URLSearchParams({ response_type: 'code', client_id: TESLA_APP_CLIENT_ID, redirect_uri: TESLA_APP_REDIRECT_URI, scope, state, prompt: 'login', prompt_missing_scopes: 'true', locale: 'en-US' });
+  const params = new URLSearchParams({ response_type: 'code', client_id: TESLA_APP_CLIENT_ID, redirect_uri: TESLA_APP_REDIRECT_URI, scope, state, prompt: 'login', locale: 'en-US' });
   res.json({ url: `https://auth.tesla.com/oauth2/v3/authorize?${params}`, state });
 });
 
@@ -637,7 +628,7 @@ app.post('/api/notifications/enable', wrap(async (req, res) => {
   // and revoked tokens before we persist garbage.
   let rotated;
   try {
-    rotated = await teslaTokenExchange(refreshParams(refresh_token));
+    rotated = await teslaTokenExchange({ grant_type: 'refresh_token', client_id: TESLA_APP_CLIENT_ID, refresh_token });
   } catch (e) {
     return res.status(400).json({ detail: 'Refresh token invalid: ' + e.message });
   }
@@ -648,7 +639,10 @@ app.post('/api/notifications/enable', wrap(async (req, res) => {
       headers: { Authorization: `Bearer ${rotated.access_token}`, 'Content-Type': 'application/json' },
     });
     const list = vr.ok ? ((await vr.json()).response || []) : [];
-    if (!list.some(v => v.id === vehicle_id)) {
+    // Tesla vehicle IDs are 16-digit ints above MAX_SAFE_INTEGER, so
+    // JSON round-tripping can lose precision and === will silently
+    // miss. Compare as strings.
+    if (!list.some(v => String(v.id) === String(vehicle_id))) {
       return res.status(400).json({ detail: 'vehicle_id not on this Tesla account' });
     }
   } catch (e) {
@@ -752,12 +746,11 @@ async function runNotifications() {
     for (const sub of subs) {
       const out = { sub_id: sub.id, slack_user_id: sub.slack_user_id, vehicle_id: sub.vehicle_id, vehicle_name: sub.vehicle_name };
       try {
-        const rotated = await teslaTokenExchange(refreshParams(sub.refresh_token));
+        const rotated = await teslaTokenExchange({ grant_type: 'refresh_token', client_id: TESLA_APP_CLIENT_ID, refresh_token: sub.refresh_token });
         // Tesla rotates refresh_tokens on each exchange; persist
         // immediately so a crash later in the loop doesn't leave us
         // with a now-revoked token next run.
         if (rotated.refresh_token && rotated.refresh_token !== sub.refresh_token) {
-          sub.refresh_token = rotated.refresh_token;
           patchSub(sub.id, { refresh_token: rotated.refresh_token });
         }
         const headers = { Authorization: `Bearer ${rotated.access_token}`, 'Content-Type': 'application/json' };

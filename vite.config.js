@@ -8,10 +8,9 @@ import preact from '@preact/preset-vite';
 const cssBeforeScript = {
   name: 'css-before-script',
   transformIndexHtml(html) {
-    const links = [...html.matchAll(/<link[^>]+rel=["']stylesheet["'][^>]*>/g)].map(m => m[0]);
+    const links = [];
+    const stripped = html.replace(/\s*<link[^>]+rel=["']stylesheet["'][^>]*>/g, m => (links.push(m.trim()), ''));
     if (!links.length) return html;
-    let stripped = html;
-    for (const l of links) stripped = stripped.replace(l, '');
     return stripped.replace(/(\s*)<script\s+type="module"/, `$1${links.join('$1')}$1<script type="module"`);
   },
 };
