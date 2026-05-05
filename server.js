@@ -410,69 +410,93 @@ async function whichSide(lat, lng) {
   // 4. Convert perpendicular offset to meters (haversine of foot point → car).
   const offsetM = haversineMeters(lat, lng, best.foot.lat, best.foot.lng);
 
-  // 5. Determine odd/even by probing reverse-geocode at small offsets perp
-  //    to the road. The side that returns an EVEN house number is the even side.
+  // 5. Determine odd/even by querying OSM for buildings on this street and
+  //    classifying each by cross-product side. Nominatim reverse-geocode
+  //    isn't dense enough to distinguish curbs reliably (both probes can
+  //    return the same near-side house number), so we go to the source.
   const segDx = best.B.lng - best.A.lng;
   const segDy = best.B.lat - best.A.lat;
-  const segLen = Math.hypot(segDx, segDy) || 1e-9;
-  // Unit perpendicular (rotated 90° CCW): (-dy, dx)
-  const perpLng = -segDy / segLen;
-  const perpLat = segDx / segLen;
-  // Try several probe distances — at large distances the perpendicular can
-  // jump to a parallel street's house numbers (e.g. cross-streets). Small
-  // distances reduce that risk but can fail to escape the curb itself.
-  // Probe at 4m, 6m, 8m and pick the first result on each side that
-  // matches the chosen way's name.
-  const metersPerDegLat = 111000;
-  const metersPerDegLng = 111000 * Math.cos(lat * Math.PI / 180);
-  const wayName = (best.way.tags?.name || '').toLowerCase();
+  const wayName = best.way.tags?.name || '';
+  const wayNameLc = wayName.toLowerCase();
 
-  async function probeAt(meters, sign /* +1 = left, -1 = right */) {
-    const stepLat = (perpLat * meters * sign) / metersPerDegLat;
-    const stepLng = (perpLng * meters * sign) / metersPerDegLng;
-    const pt = { lat: best.foot.lat + stepLat, lng: best.foot.lng + stepLng };
-    let addr = null;
-    try { addr = await reverseGeocodeLocation(pt.lat, pt.lng); } catch {}
-    return { pt, addr };
+  // Query buildings tagged with this street name within ~80m of the foot.
+  // `out tags center` gives polygon centroids without dragging full geom.
+  // Quote escaping: addr:street values can contain spaces, so wrap in quotes.
+  let buildings = [];
+  if (wayName) {
+    const escName = wayName.replace(/"/g, '\\"');
+    const bq = `[out:json][timeout:10];(way(around:80,${best.foot.lat},${best.foot.lng})["building"]["addr:street"="${escName}"];node(around:80,${best.foot.lat},${best.foot.lng})["addr:housenumber"]["addr:street"="${escName}"];);out tags center;`;
+    try {
+      const r = await fetchWithTimeout(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(bq)}`, { headers: { 'User-Agent': UA } }, 12000);
+      if (r.ok) {
+        const j = await r.json();
+        for (const e of j.elements || []) {
+          const c = e.center || (e.lat != null ? { lat: e.lat, lon: e.lon } : null);
+          const hn = e.tags?.['addr:housenumber'];
+          if (!c || !hn) continue;
+          const m = String(hn).match(/(\d+)/);
+          if (!m) continue;
+          buildings.push({
+            num: parseInt(m[1], 10),
+            lat: c.lat,
+            lng: c.lng != null ? c.lng : c.lon,
+          });
+        }
+      }
+    } catch {}
   }
 
-  // First probe at the natural 6m, then expand if we don't get a same-street hit.
-  const probeDistances = [6, 4, 8, 10];
-  let leftProbe = null, rightProbe = null;
-  for (const d of probeDistances) {
-    if (!leftProbe || (leftProbe.addr?.street || '').toLowerCase() !== wayName) {
-      leftProbe = await probeAt(d, +1);
+  // Classify each building by cross sign relative to A→B and aggregate
+  // parity counts per side. The side with more even-numbered buildings is
+  // the even side; the other is odd.
+  let leftEven = 0, leftOdd = 0, rightEven = 0, rightOdd = 0;
+  let leftBuildings = [], rightBuildings = [];
+  for (const b of buildings) {
+    const s = crossSign(best.A, best.B, { lat: b.lat, lng: b.lng });
+    if (s > 0) {
+      leftBuildings.push(b);
+      if (b.num % 2 === 0) leftEven++; else leftOdd++;
+    } else if (s < 0) {
+      rightBuildings.push(b);
+      if (b.num % 2 === 0) rightEven++; else rightOdd++;
     }
-    if (!rightProbe || (rightProbe.addr?.street || '').toLowerCase() !== wayName) {
-      rightProbe = await probeAt(d, -1);
-    }
-    const leftMatches = (leftProbe?.addr?.street || '').toLowerCase() === wayName;
-    const rightMatches = (rightProbe?.addr?.street || '').toLowerCase() === wayName;
-    if (leftMatches && rightMatches) break;
   }
-  const leftPoint = leftProbe?.pt || { lat: null, lng: null };
-  const rightPoint = rightProbe?.pt || { lat: null, lng: null };
-  const leftAddr = leftProbe?.addr || null;
-  const rightAddr = rightProbe?.addr || null;
+  // Decide which side is even based on majority parity.
+  let evenSideSign = null; // +1 if left of A→B is even, -1 if right of A→B is even
+  if (leftEven + rightOdd > 0 && leftEven > leftOdd && rightOdd > rightEven) evenSideSign = +1;
+  else if (leftOdd + rightEven > 0 && leftOdd > leftEven && rightEven > rightOdd) evenSideSign = -1;
+  // Edge case: only one side has data. Use that side's majority.
+  else if (leftBuildings.length && !rightBuildings.length) {
+    evenSideSign = (leftEven > leftOdd) ? +1 : -1;
+  } else if (rightBuildings.length && !leftBuildings.length) {
+    evenSideSign = (rightEven > rightOdd) ? -1 : +1;
+  }
 
-  const parseHouse = (a) => {
-    if (!a?.house_number) return null;
-    if (wayName && (a.street || '').toLowerCase() !== wayName) return null;
-    const m = String(a.house_number).match(/(\d+)/);
-    return m ? parseInt(m[1], 10) : null;
-  };
-  const leftN = parseHouse(leftAddr);
-  const rightN = parseHouse(rightAddr);
-
-  // Map cross sign → which probe is on the same side as the car.
-  // cross > 0: car is left of A→B direction → leftPoint is closer side
-  // cross < 0: car is right of A→B → rightPoint is closer side
-  let carNum = null, oppositeNum = null;
-  if (cross > 0) { carNum = leftN; oppositeNum = rightN; }
-  else if (cross < 0) { carNum = rightN; oppositeNum = leftN; }
-
+  // Determine the car's side parity by combining its cross sign with the
+  // even-side mapping derived from building parity.
   let side = 'unknown';
-  if (carNum != null) side = (carNum % 2 === 0) ? 'even' : 'odd';
+  if (evenSideSign != null && cross !== 0) {
+    const carIsOnEvenSide = (cross === evenSideSign);
+    side = carIsOnEvenSide ? 'even' : 'odd';
+  }
+
+  // Pick a representative house number on each side for the response —
+  // the one nearest to the car's foot.
+  function nearest(side) {
+    if (!side.length) return null;
+    const f = best.foot;
+    let bb = null, bd = Infinity;
+    for (const b of side) {
+      const d = haversineMeters(f.lat, f.lng, b.lat, b.lng);
+      if (d < bd) { bd = d; bb = b; }
+    }
+    return bb ? bb.num : null;
+  }
+  const leftRep = nearest(leftBuildings);
+  const rightRep = nearest(rightBuildings);
+  let carNum = null, oppositeNum = null;
+  if (cross > 0) { carNum = leftRep; oppositeNum = rightRep; }
+  else if (cross < 0) { carNum = rightRep; oppositeNum = leftRep; }
 
   return {
     side,
@@ -481,10 +505,9 @@ async function whichSide(lat, lng) {
     cross_sign: cross,
     car_house_number: carNum,
     opposite_house_number: oppositeNum,
-    probes: {
-      left:  { lat: leftPoint.lat,  lng: leftPoint.lng,  addr: leftAddr },
-      right: { lat: rightPoint.lat, lng: rightPoint.lng, addr: rightAddr },
-    },
+    buildings_seen: buildings.length,
+    side_parity: { left_even: leftEven, left_odd: leftOdd, right_even: rightEven, right_odd: rightOdd },
+    even_side: evenSideSign === +1 ? 'left of A→B' : evenSideSign === -1 ? 'right of A→B' : 'unknown',
     way_id: best.way.id,
     segment: { A: best.A, B: best.B, t: best.t, foot: best.foot },
   };
