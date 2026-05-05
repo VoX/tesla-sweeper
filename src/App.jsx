@@ -555,7 +555,7 @@ export default function App() {
       return;
     }
 
-    const data = await post('sweep-check', { address: addr, today_date: clientToday(), past_noon: new Date().getHours() >= 12 });
+    const data = await post('sweep-check', { address: addr, today_date: clientToday(), past_noon: new Date().getHours() >= 12, lat: vehicle.latitude, lng: vehicle.longitude });
     if (data.found) {
       setSweepData(data);
       saveCachedCheck(vehicleId, { mapPos: mapPosVal, vehicleInfo: vehicleInfoVal, sweepData: data });

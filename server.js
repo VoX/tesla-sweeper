@@ -176,7 +176,7 @@ async function reverseGeocodeLocation(lat, lng) {
   };
 }
 
-async function runSweepCheck({ address, today_date, past_noon = false }) {
+async function runSweepCheck({ address, today_date, past_noon = false, lat, lng }) {
   const todayStr = today_date || new Date().toISOString().slice(0, 10);
   const today = new Date(todayStr + 'T12:00:00Z');
   const future = new Date(today); future.setDate(future.getDate() + 30);
@@ -218,7 +218,29 @@ async function runSweepCheck({ address, today_date, past_noon = false }) {
 
   const houseMatch = address.trim().match(/^(\d+)/);
   const houseNum = houseMatch ? parseInt(houseMatch[1]) : null;
-  const carSide = houseNum ? (houseNum % 2 === 0 ? 'even' : 'odd') : null;
+
+  // Prefer OSM-derived geometric side detection when coordinates are
+  // available — the houseNum % 2 heuristic breaks when a car parks
+  // across from its own address (no opposing house, oversized lots).
+  // Fall back to parity if OSM lacks building data for the street or
+  // the lookup fails.
+  let carSide = null;
+  let sideSource = null;
+  if (typeof lat === 'number' && typeof lng === 'number') {
+    try {
+      const ws = await whichSide(lat, lng);
+      if (ws.side === 'odd' || ws.side === 'even') {
+        carSide = ws.side;
+        sideSource = 'osm';
+      }
+    } catch (e) {
+      console.warn('[sweep-check] whichSide failed:', e.message);
+    }
+  }
+  if (!carSide && houseNum) {
+    carSide = houseNum % 2 === 0 ? 'even' : 'odd';
+    sideSource = 'house_parity';
+  }
 
   const sweepingToday = sweepEvents.filter(e => e.date === todayStr);
   const sweepingTomorrow = sweepEvents.filter(e => e.date === tomorrowStr);
@@ -281,6 +303,7 @@ async function runSweepCheck({ address, today_date, past_noon = false }) {
     status, title, message,
     sweep_events: sweepEvents,
     car_side: carSide,
+    side_source: sideSource,
     house_num: houseNum,
     days_until_next: daysUntilNext,
     latitude,
@@ -551,9 +574,9 @@ app.post('/api/which-side', wrap(async (req, res) => {
 }));
 
 app.post('/api/sweep-check', wrap(async (req, res) => {
-  const { address, today_date, past_noon } = req.body;
+  const { address, today_date, past_noon, lat, lng } = req.body;
   if (!address) return res.status(400).json({ detail: 'Address required' });
-  res.json(await runSweepCheck({ address, today_date, past_noon }));
+  res.json(await runSweepCheck({ address, today_date, past_noon, lat, lng }));
 }));
 
 // Pre-configured app OAuth — credentials stay server-side
@@ -808,7 +831,12 @@ async function runNotifications() {
         out.address = geo.display_name || addr;
         if (!addr) throw new Error('No street resolved from coordinates');
 
-        const sweep = await runSweepCheck({ address: addr, today_date: new Date().toISOString().slice(0, 10) });
+        const sweep = await runSweepCheck({
+          address: addr,
+          today_date: new Date().toISOString().slice(0, 10),
+          lat: latitude,
+          lng: longitude,
+        });
         out.found = !!sweep.found;
         out.days_until_next = sweep.days_until_next ?? null;
         out.status = sweep.status || null;
