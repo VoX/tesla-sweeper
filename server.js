@@ -15,7 +15,7 @@ try {
   }
 } catch {}
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '10kb' }));
 
 const TESLA_APP_CLIENT_ID = process.env.TESLA_CLIENT_ID || '';
 const TESLA_APP_CLIENT_SECRET = process.env.TESLA_CLIENT_SECRET || '';
@@ -63,9 +63,21 @@ const SUBS_FILE = join(SUBS_DIR, 'subscriptions.json');
 const NOTIFICATIONS_RUN_TOKEN = process.env.NOTIFICATIONS_RUN_TOKEN || '';
 mkdirSync(SUBS_DIR, { recursive: true, mode: 0o700 });
 function loadStore() {
-  try {
-    return JSON.parse(readFileSync(SUBS_FILE, 'utf8'));
-  } catch { return { subscriptions: [] }; }
+  let raw;
+  try { raw = readFileSync(SUBS_FILE, 'utf8'); }
+  catch (e) {
+    if (e.code === 'ENOENT') return { subscriptions: [] };
+    throw e;
+  }
+  try { return JSON.parse(raw); }
+  catch (e) {
+    // Preserve corrupt file aside instead of silently nuking subs —
+    // a single bad byte would otherwise lose all rotated tokens.
+    const aside = `${SUBS_FILE}.corrupt.${Date.now()}`;
+    try { renameSync(SUBS_FILE, aside); } catch {}
+    console.error(`[store] parse failed, moved aside to ${aside}: ${e.message}`);
+    return { subscriptions: [] };
+  }
 }
 function saveStore(store) {
   const tmp = SUBS_FILE + '.tmp';
@@ -74,8 +86,6 @@ function saveStore(store) {
 }
 function loadSubs() { return loadStore().subscriptions || []; }
 function saveSubs(subs) { const s = loadStore(); s.subscriptions = subs; saveStore(s); }
-function getLastRunAt() { return loadStore().last_run_at || null; }
-function setLastRunAt(ts) { const s = loadStore(); s.last_run_at = ts; saveStore(s); }
 function publicSub(s) {
   return { id: s.id, slack_user_id: s.slack_user_id, vehicle_name: s.vehicle_name, vehicle_id: s.vehicle_id, oauth_mode: s.oauth_mode, created_at: s.created_at, last_check_at: s.last_check_at };
 }
@@ -680,6 +690,19 @@ app.post('/api/notifications/enable', wrap(async (req, res) => {
   } catch (e) {
     return res.status(400).json({ detail: 'Refresh token invalid: ' + e.message });
   }
+  // Confirm the supplied vehicle_id is reachable with this token —
+  // otherwise the cron 404s daily forever.
+  try {
+    const vr = await fetchWithTimeout(`${TESLA_BASE}/api/1/vehicles`, {
+      headers: { Authorization: `Bearer ${rotated.access_token}`, 'Content-Type': 'application/json' },
+    });
+    const list = vr.ok ? ((await vr.json()).response || []) : [];
+    if (!list.some(v => v.id === vehicle_id)) {
+      return res.status(400).json({ detail: 'vehicle_id not on this Tesla account' });
+    }
+  } catch (e) {
+    return res.status(502).json({ detail: 'Tesla vehicles lookup failed: ' + e.message });
+  }
   const subs = loadSubs();
   // One subscription per (slack_user_id, vehicle_id) — re-enable replaces.
   const filtered = subs.filter(s => !(s.slack_user_id === slack_user_id && s.vehicle_id === vehicle_id));
@@ -743,45 +766,50 @@ function formatSweepDM(out) {
     ? new Date(event.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' })
     : '';
   const sideLabel = event.side === 'both' ? 'both sides' : `*${event.side}* side`;
-  return [
-    `:broom: *${out.vehicle_name}* — sweep in ${days} day${days === 1 ? '' : 's'} on the ${sideLabel}.`,
-    `${dayLabel}, ${event.time}`,
-    `:round_pushpin: ${out.address || 'address unresolved'}`,
-    `<https://claw.bitvox.me/sweeper/>`,
-  ].join('\n');
+  return `:broom: *${out.vehicle_name}* — sweep in ${days} day${days === 1 ? '' : 's'} on the ${sideLabel}.
+${dayLabel}, ${event.time}
+:round_pushpin: ${out.address || 'address unresolved'}
+<https://claw.bitvox.me/sweeper/>`;
 }
 
 // Skip DM when the sweep covers a side opposite the user's parked side
 // — no point pinging if they don't have to move.
 function shouldNotifySweep(out) {
-  if (!out.ok || !out.found) return false;
-  if (![1, 2, 3].includes(out.days_until_next)) return false;
-  const eventSide = out.next_event?.side;
-  if (!eventSide) return false;
-  if (eventSide === 'both') return true;
-  return out.car_side === eventSide;
+  const side = out.next_event?.side;
+  return !!(out.ok && out.found && [1, 2, 3].includes(out.days_until_next)
+    && side && (side === 'both' || side === out.car_side));
 }
 
 // Single-flight guard. Both the in-process cron and the HTTP /run
 // endpoint call runNotifications; without this, two concurrent loads
 // would fight on the rotated refresh_token rename and brick a sub.
+// Apply a partial update to one sub by id, re-loading the store so any
+// concurrent /enable or /disable during the run is preserved. Drops the
+// patch if the sub was disabled mid-run.
+function patchSub(subId, patch) {
+  const store = loadStore();
+  const sub = (store.subscriptions || []).find(s => s.id === subId);
+  if (!sub) return;
+  Object.assign(sub, patch);
+  saveStore(store);
+}
+
 let runningNotifications = null;
 async function runNotifications() {
   if (runningNotifications) return runningNotifications;
   runningNotifications = (async () => {
-    const store = loadStore();
-    const subs = store.subscriptions || [];
+    const subs = loadStore().subscriptions || [];
     const results = [];
     for (const sub of subs) {
       const out = { sub_id: sub.id, slack_user_id: sub.slack_user_id, vehicle_id: sub.vehicle_id, vehicle_name: sub.vehicle_name };
       try {
         const rotated = await teslaTokenExchange(buildRefreshParams(sub.oauth_mode, sub.refresh_token, sub.client_id));
-        // Tesla rotates refresh_tokens on each exchange; persist the
-        // new one immediately so a crash later in the loop doesn't
-        // leave us with a now-revoked token on the next run.
+        // Tesla rotates refresh_tokens on each exchange; persist
+        // immediately so a crash later in the loop doesn't leave us
+        // with a now-revoked token next run.
         if (rotated.refresh_token && rotated.refresh_token !== sub.refresh_token) {
           sub.refresh_token = rotated.refresh_token;
-          saveStore(store);
+          patchSub(sub.id, { refresh_token: rotated.refresh_token });
         }
         const headers = { Authorization: `Bearer ${rotated.access_token}`, 'Content-Type': 'application/json' };
 
@@ -813,8 +841,10 @@ async function runNotifications() {
         out.ok = false;
         out.error = e.message;
       }
-      sub.last_check_at = new Date().toISOString();
-      sub.last_result = { ok: out.ok, days_until_next: out.days_until_next, error: out.error };
+      patchSub(sub.id, {
+        last_check_at: new Date().toISOString(),
+        last_result: { ok: out.ok, days_until_next: out.days_until_next, error: out.error },
+      });
       results.push(out);
     }
     for (const out of results) {
@@ -825,8 +855,11 @@ async function runNotifications() {
     }
     // Only mark "ran today" if at least one sub processed successfully.
     // A total-outage day shouldn't suppress tomorrow's missed-run recovery.
-    if (results.some(r => r.ok)) store.last_run_at = new Date().toISOString();
-    saveStore(store);
+    if (results.some(r => r.ok)) {
+      const store = loadStore();
+      store.last_run_at = new Date().toISOString();
+      saveStore(store);
+    }
     return { ran_at: new Date().toISOString(), results };
   })().finally(() => { runningNotifications = null; });
   return runningNotifications;
@@ -847,20 +880,22 @@ app.all('/api/*', (req, res) => res.status(404).json({ detail: 'API endpoint not
 app.use(express.static(join(__dirname, 'dist')));
 app.get('*', (req, res) => res.sendFile(join(__dirname, 'dist', 'index.html')));
 
-process.on('uncaughtException', (e) => console.error('Uncaught:', e));
+// Exit on uncaught exceptions — continuing leaves the process in
+// undefined state (mid-write file handles, half-rotated tokens).
+// systemd will restart cleanly via Restart=on-failure.
+process.on('uncaughtException', (e) => { console.error('Uncaught:', e); process.exit(1); });
 process.on('unhandledRejection', (e) => console.error('Unhandled rejection:', e));
 
 // Daily noon-ET notification cron. node-cron handles DST via the
 // timezone string, so the calendar expression stays identical year-round.
 function startNotificationCron() {
-  cron.schedule('0 12 * * *', () => {
+  cron.schedule('0 12 * * *', async () => {
     console.log('[cron] firing daily notification run');
-    runNotifications()
-      .then(r => {
-        const dms = r.results.filter(o => o.dm_sent).length;
-        console.log(`[cron] ran ${r.results.length} sub(s), sent ${dms} DM(s)`);
-      })
-      .catch(e => console.error('[cron] runNotifications failed:', e));
+    try {
+      const r = await runNotifications();
+      const dms = r.results.filter(o => o.dm_sent).length;
+      console.log(`[cron] ran ${r.results.length} sub(s), sent ${dms} DM(s)`);
+    } catch (e) { console.error('[cron] runNotifications failed:', e); }
   }, { timezone: 'America/New_York' });
 }
 
@@ -874,7 +909,7 @@ function maybeRecoverMissedRun() {
   const todayET = fmtDate.format(new Date());
   const hourET = parseInt(fmtHour.format(new Date()), 10);
   if (hourET < 12) return;
-  const last = getLastRunAt();
+  const last = loadStore().last_run_at || null;
   const lastDateET = last ? fmtDate.format(new Date(last)) : null;
   if (lastDateET === todayET) return;
   console.log(`[cron] recovering missed run (last: ${lastDateET || 'never'}, today: ${todayET})`);

@@ -15,11 +15,12 @@ const API = import.meta.env.DEV ? '/sweeper/api' : 'api';
 // Car" button still bypasses cache when the user wants fresh data.
 const CHECK_CACHE_MS = 6 * 60 * 60 * 1000;
 const CHECK_CACHE_KEY = 'tesla_last_check';
+const CHECK_CACHE_VERSION = 1;
 function readCachedCheck(vehicleId) {
   if (!vehicleId) return null;
   try {
     const c = JSON.parse(localStorage.getItem(CHECK_CACHE_KEY));
-    if (!c || c.vehicle_id !== vehicleId) return null;
+    if (!c || c.v !== CHECK_CACHE_VERSION || c.vehicle_id !== vehicleId) return null;
     if (Date.now() - c.at > CHECK_CACHE_MS) return null;
     return c;
   } catch { return null; }
@@ -28,7 +29,7 @@ function saveCachedCheck(vehicleId, payload) {
   if (!vehicleId) return;
   try {
     localStorage.setItem(CHECK_CACHE_KEY, JSON.stringify({
-      vehicle_id: vehicleId, at: Date.now(), ...payload,
+      v: CHECK_CACHE_VERSION, vehicle_id: vehicleId, at: Date.now(), ...payload,
     }));
   } catch {}
 }
@@ -75,10 +76,11 @@ function MapView({ lat, lng, street }) {
   const mapInstance = useRef(null);
   const markerRef = useRef(null);
 
-  useEffect(() => {
-    return () => {
-      if (mapInstance.current) { mapInstance.current.remove(); mapInstance.current = null; markerRef.current = null; }
-    };
+  // Two effects on purpose: the [] one tears down on unmount, the
+  // [lat,lng,street] one updates marker in place without destroying
+  // the map (smooth repositioning when the car location changes).
+  useEffect(() => () => {
+    if (mapInstance.current) { mapInstance.current.remove(); mapInstance.current = null; markerRef.current = null; }
   }, []);
 
   useEffect(() => {
@@ -118,7 +120,7 @@ function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
         <div className="card">
           <h3>Upcoming Sweeping Events</h3>
           {data.sweep_events.slice(0, 8).map((evt, i) => {
-            const yourSide = data.car_side && (evt.side === data.car_side || evt.side === 'both');
+            const yourSide = evt.side === 'both' || (data.car_side && evt.side === data.car_side);
             const evtDate = new Date(evt.date + 'T12:00:00');
             const todayMid = new Date(clientToday() + 'T12:00:00');
             const daysAway = Math.round((evtDate - todayMid) / 86400000);
@@ -404,6 +406,10 @@ export default function App() {
     setSelectedVehicle(null);
     setOauthStatus('');
     setSubscriptions(null);
+    // Clear cached check directly — the localStorage useEffect only
+    // runs when the value differs, and a stale `tesla_last_check`
+    // would otherwise survive a logout/login cycle.
+    try { localStorage.removeItem(CHECK_CACHE_KEY); } catch {}
     reset();
   };
 
@@ -523,6 +529,12 @@ export default function App() {
     const data = await post('vehicles', { token: accessToken });
     setVehicles(data.vehicles);
     if (data.vehicles.length === 1) setSelectedVehicle(data.vehicles[0].id);
+    // Drop a stale selectedVehicle if the new list doesn't contain it —
+    // happens after switching Tesla accounts. Otherwise the next
+    // /api/check would 404/401 with the old id from another account.
+    else if (selectedVehicle && !data.vehicles.some(v => v.id === selectedVehicle)) {
+      setSelectedVehicle(null);
+    }
     return data.vehicles;
   };
 
@@ -571,6 +583,7 @@ export default function App() {
 
   const handleCheckAddress = async () => {
     if (!address.trim()) { setError('Please enter an address'); return; }
+    if (loading) return;
     reset();
     setLoading(true);
     try {
@@ -579,6 +592,10 @@ export default function App() {
       setSweepData(data);
       if (data.latitude && data.longitude) {
         setMapPos({ lat: data.latitude, lng: data.longitude, street: data.place_name });
+      } else {
+        // No coords from server — clear any stale map from a prior
+        // successful query so the user doesn't see a wrong-address pin.
+        setMapPos(null);
       }
       const url = new URL(window.location);
       url.searchParams.set('address', address.trim());
@@ -589,6 +606,7 @@ export default function App() {
 
   const handleCheckCar = async (vid) => {
     if (!tokens?.access_token) return;
+    if (loading) return;
     reset();
     setLoading(true);
     // 7s after start, assume the car was asleep and the server is in
