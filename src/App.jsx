@@ -148,6 +148,94 @@ function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
   );
 }
 
+// Side-detection test panel. Draggable marker on a Leaflet map; on drop,
+// hits POST /api/which-side and renders the algorithm's reasoning so we
+// can validate the geometry against ground truth (e.g. drag pin to
+// either curb of Harvard St, confirm the side flips).
+function TestSidePanel() {
+  const mapRef = useRef(null);
+  const mapInstance = useRef(null);
+  const markerRef = useRef(null);
+  const [pos, setPos] = useState({ lat: 42.385081, lng: -71.107841 }); // 9 Harvard St default
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const probe = useCallback(async (lat, lng) => {
+    setLoading(true); setError('');
+    try {
+      const r = await post('which-side', { lat, lng });
+      setResult(r);
+    } catch (e) { setError(e.message); setResult(null); }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => () => {
+    if (mapInstance.current) { mapInstance.current.remove(); mapInstance.current = null; markerRef.current = null; }
+  }, []);
+
+  useEffect(() => {
+    if (!mapRef.current) return;
+    if (mapInstance.current) return; // already mounted
+    const m = L.map(mapRef.current).setView([pos.lat, pos.lng], 18);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(m);
+    const mk = L.marker([pos.lat, pos.lng], { draggable: true }).addTo(m);
+    mk.on('dragend', () => {
+      const ll = mk.getLatLng();
+      setPos({ lat: ll.lat, lng: ll.lng });
+      probe(ll.lat, ll.lng);
+    });
+    mapInstance.current = m;
+    markerRef.current = mk;
+    probe(pos.lat, pos.lng); // initial probe
+  }, [probe]);
+
+  // Draw the chosen road segment + perpendicular foot whenever result updates.
+  useEffect(() => {
+    if (!mapInstance.current || !result?.segment) return;
+    const map = mapInstance.current;
+    if (map._segOverlay) map.removeLayer(map._segOverlay);
+    if (map._footOverlay) map.removeLayer(map._footOverlay);
+    const seg = result.segment;
+    if (seg?.A && seg?.B) {
+      map._segOverlay = L.polyline([[seg.A.lat, seg.A.lng], [seg.B.lat, seg.B.lng]], { color: '#3fb950', weight: 4, opacity: 0.7 }).addTo(map);
+    }
+    if (seg?.foot && pos) {
+      map._footOverlay = L.polyline([[seg.foot.lat, seg.foot.lng], [pos.lat, pos.lng]], { color: '#f85149', weight: 2, dashArray: '4 4' }).addTo(map);
+    }
+  }, [result, pos]);
+
+  return (
+    <div role="tabpanel">
+      <p style={{ fontSize: '0.85rem', color: '#8b949e', marginBottom: 12 }}>
+        Drag the pin to test side-detection. Green line = OSM road segment the algorithm picked.
+        Red dashed line = perpendicular from pin to that segment.
+      </p>
+      <div ref={mapRef} className="map-container" style={{ height: 360 }} />
+      <div className="card" style={{ marginTop: 12 }}>
+        <h3>Detection Result {loading && <span style={{ fontSize: '0.7rem', color: '#8b949e' }}>(probing...)</span>}</h3>
+        {error && <p style={{ color: '#f85149' }}>{error}</p>}
+        {result && (
+          <>
+            <Row label="Side" value={
+              <strong style={{ color: result.side === 'odd' ? '#d29922' : result.side === 'even' ? '#3fb950' : '#8b949e' }}>
+                {result.side?.toUpperCase() || 'UNKNOWN'}
+              </strong>
+            } />
+            <Row label="Road" value={result.road_name} />
+            <Row label="Offset from centerline" value={result.perpendicular_offset_m != null ? `${result.perpendicular_offset_m} m` : '—'} />
+            <Row label="Cross sign" value={String(result.cross_sign)} />
+            <Row label="Car-side house #" value={result.car_house_number ?? '—'} />
+            <Row label="Opposite-side house #" value={result.opposite_house_number ?? '—'} />
+            <Row label="Pin lat/lng" value={`${pos.lat.toFixed(6)}, ${pos.lng.toFixed(6)}`} />
+            <Row label="OSM way id" value={result.way_id ?? '—'} />
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function clientToday() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -656,6 +744,7 @@ export default function App() {
     { id: 'address', icon: '\uD83D\uDCCD', label: 'Address' },
     { id: 'app', icon: '\uD83D\uDE97', label: 'Tesla Login' },
     { id: 'oauth', icon: '\uD83D\uDD10', label: 'Custom OAuth' },
+    { id: 'test', icon: '\uD83E\uDDEA', label: 'Test Side' },
   ];
 
   return (
@@ -765,6 +854,8 @@ export default function App() {
           {!tokens && oauthStatus && <div className="oauth-status">{oauthStatus}</div>}
         </div>
       )}
+
+      {tab === 'test' && <TestSidePanel />}
 
       {error && (
         <div className="error-box">

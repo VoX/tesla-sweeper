@@ -349,6 +349,146 @@ app.post('/api/reverse-geocode', wrap(async (req, res) => {
   res.json(await reverseGeocodeLocation(lat, lng));
 }));
 
+// Determine which curb (odd / even side) a given lat/lng is parked on.
+// Uses OSM Overpass to fetch nearby road geometry, finds the closest road
+// segment, computes cross-product sign to know left/right of travel
+// direction, then probes reverse-geocode at perpendicular offset points to
+// see which side carries odd vs even house numbers.
+//
+// Body: { lat, lng }
+// Returns: {
+//   side: "odd" | "even" | "unknown",
+//   road_name: string,
+//   perpendicular_offset_m: number,
+//   cross_sign: -1 | 0 | +1,            // sign of the cross product (debug)
+//   probes: { left: {...}, right: {...} },
+//   way_id, segment, debug
+// }
+async function whichSide(lat, lng) {
+  // 1. Overpass query for highway ways within 50m.
+  const q = `[out:json][timeout:10];way(around:50,${lat},${lng})[highway];out geom;`;
+  const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(q)}`;
+  const overpassRes = await fetchWithTimeout(url, { headers: { 'User-Agent': UA } }, 12000);
+  if (!overpassRes.ok) throw new Error(`Overpass ${overpassRes.status}`);
+  const opData = await overpassRes.json();
+  const ways = (opData.elements || []).filter(e => e.type === 'way' && e.geometry?.length >= 2);
+  if (!ways.length) return { side: 'unknown', error: 'no nearby roads in OSM' };
+
+  // 2. Find closest segment across all ways. OSM returns nodes as
+  //    {lat, lon} — normalize to {lat, lng} so the rest of the code can
+  //    use one field name throughout.
+  const norm = (n) => ({ lat: n.lat, lng: n.lng != null ? n.lng : n.lon });
+  let best = null;
+  for (const way of ways) {
+    const geom = way.geometry.map(norm);
+    for (let i = 0; i < geom.length - 1; i++) {
+      const A = geom[i], B = geom[i + 1];
+      const r = projectPointToSegment({ lat, lng }, A, B);
+      if (!best || r.dist < best.dist) {
+        best = { way, segIndex: i, A, B, ...r };
+      }
+    }
+  }
+  if (!best) return { side: 'unknown', error: 'no segments' };
+
+  // 3. Cross-product sign — which side of A→B direction is the point on.
+  const cross = crossSign(best.A, best.B, { lat, lng });
+
+  // 4. Convert perpendicular offset to meters (haversine of foot point → car).
+  const offsetM = haversineMeters(lat, lng, best.foot.lat, best.foot.lng);
+
+  // 5. Determine odd/even by probing reverse-geocode at small offsets perp
+  //    to the road. The side that returns an EVEN house number is the even side.
+  const segDx = best.B.lng - best.A.lng;
+  const segDy = best.B.lat - best.A.lat;
+  const segLen = Math.hypot(segDx, segDy) || 1e-9;
+  // Unit perpendicular (rotated 90° CCW): (-dy, dx)
+  const perpLng = -segDy / segLen;
+  const perpLat = segDx / segLen;
+  // Offset by ~10m on each side.
+  const metersPerDegLat = 111000;
+  const metersPerDegLng = 111000 * Math.cos(lat * Math.PI / 180);
+  const offsetDeg = 10; // meters, applied scaled below
+  const stepLat = (perpLat * offsetDeg) / metersPerDegLat;
+  const stepLng = (perpLng * offsetDeg) / metersPerDegLng;
+  const leftPoint  = { lat: best.foot.lat + stepLat, lng: best.foot.lng + stepLng };
+  const rightPoint = { lat: best.foot.lat - stepLat, lng: best.foot.lng - stepLng };
+
+  let leftAddr = null, rightAddr = null;
+  try { leftAddr  = await reverseGeocodeLocation(leftPoint.lat,  leftPoint.lng); } catch {}
+  try { rightAddr = await reverseGeocodeLocation(rightPoint.lat, rightPoint.lng); } catch {}
+
+  const parseHouse = (a) => {
+    if (!a?.house_number) return null;
+    const m = String(a.house_number).match(/(\d+)/);
+    return m ? parseInt(m[1], 10) : null;
+  };
+  const leftN = parseHouse(leftAddr);
+  const rightN = parseHouse(rightAddr);
+
+  // Map cross sign → which probe is on the same side as the car.
+  // cross > 0: car is left of A→B direction → leftPoint is closer side
+  // cross < 0: car is right of A→B → rightPoint is closer side
+  let carNum = null, oppositeNum = null;
+  if (cross > 0) { carNum = leftN; oppositeNum = rightN; }
+  else if (cross < 0) { carNum = rightN; oppositeNum = leftN; }
+
+  let side = 'unknown';
+  if (carNum != null) side = (carNum % 2 === 0) ? 'even' : 'odd';
+
+  return {
+    side,
+    road_name: best.way.tags?.name || best.way.tags?.ref || 'unknown',
+    perpendicular_offset_m: Math.round(offsetM * 10) / 10,
+    cross_sign: cross,
+    car_house_number: carNum,
+    opposite_house_number: oppositeNum,
+    probes: {
+      left:  { lat: leftPoint.lat,  lng: leftPoint.lng,  addr: leftAddr },
+      right: { lat: rightPoint.lat, lng: rightPoint.lng, addr: rightAddr },
+    },
+    way_id: best.way.id,
+    segment: { A: best.A, B: best.B, t: best.t, foot: best.foot },
+  };
+}
+
+// Project P onto segment AB (lat/lng treated as planar — fine at street scale).
+// Returns { dist, t (clamped 0..1), foot (the projection point) }.
+function projectPointToSegment(P, A, B) {
+  const dx = B.lng - A.lng, dy = B.lat - A.lat;
+  const len2 = dx * dx + dy * dy;
+  if (len2 === 0) {
+    return { dist: Math.hypot(P.lng - A.lng, P.lat - A.lat), t: 0, foot: { lat: A.lat, lng: A.lng } };
+  }
+  let t = ((P.lng - A.lng) * dx + (P.lat - A.lat) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  const fx = A.lng + dx * t, fy = A.lat + dy * t;
+  return { dist: Math.hypot(P.lng - fx, P.lat - fy), t, foot: { lat: fy, lng: fx } };
+}
+
+function crossSign(A, B, P) {
+  const dx = B.lng - A.lng, dy = B.lat - A.lat;
+  const px = P.lng - A.lng, py = P.lat - A.lat;
+  const c = dx * py - dy * px;
+  return c > 0 ? 1 : c < 0 ? -1 : 0;
+}
+
+function haversineMeters(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const toRad = (d) => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat/2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng/2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+app.post('/api/which-side', wrap(async (req, res) => {
+  const { lat, lng } = req.body;
+  if (typeof lat !== 'number' || typeof lng !== 'number') {
+    return res.status(400).json({ detail: 'lat and lng required as numbers' });
+  }
+  res.json(await whichSide(lat, lng));
+}));
+
 app.post('/api/sweep-check', wrap(async (req, res) => {
   const { address, today_date, past_noon } = req.body;
   if (!address) return res.status(400).json({ detail: 'Address required' });
