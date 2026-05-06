@@ -224,7 +224,11 @@ function clientToday() { return new Date().toLocaleDateString('sv-SE'); }
 function parseSlackInput(value) {
   const v = value.trim();
   if (!v.includes('/') && !v.includes('?')) return v;
-  const m = v.match(/(?:\/(?:team|user_profile)\/|[?&]id=)(U[A-Z0-9]+)/);
+  // Try the URL-shape patterns first; fall back to any U-id token in
+  // the string for newer Slack web URLs that don't match the legacy
+  // /team/ /user_profile/ /?id= shapes.
+  const m = v.match(/(?:\/(?:team|user_profile)\/|[?&]id=)(U[A-Z0-9]+)/)
+    || v.match(/\b(U[A-Z][A-Z0-9]+)\b/);
   return m ? m[1] : v;
 }
 
@@ -291,14 +295,6 @@ export default function App() {
     else url.searchParams.set('tab', tab);
     window.history.replaceState({}, '', url);
   }, [tab]);
-  // One-time strip of legacy ?address= (from the deleted Address tab).
-  useEffect(() => {
-    if (new URLSearchParams(window.location.search).has('address')) {
-      const url = new URL(window.location);
-      url.searchParams.delete('address');
-      window.history.replaceState({}, '', url);
-    }
-  }, []);
   const [loading, setLoading] = useState(false);
   // Sub-message shown under the loading state. Used to surface
   // "your car is asleep, waking it" after the first few seconds —
@@ -410,12 +406,9 @@ export default function App() {
 
   const fetchSubscriptions = async (uid) => {
     if (!uid) return;
-    try {
-      const data = await get(`notifications/status?slack_user_id=${encodeURIComponent(uid)}`);
-      setSubscriptions(data.subscriptions || []);
-    } catch (e) {
-      console.warn('[fetchSubscriptions]', e.message);
-    }
+    const data = await get(`notifications/status?slack_user_id=${encodeURIComponent(uid)}`)
+      .catch(() => ({ subscriptions: [] }));
+    setSubscriptions(data.subscriptions || []);
   };
 
   const enableNotifications = async () => {
@@ -778,7 +771,7 @@ export default function App() {
                 />
               )}
               <button className="disconnect-btn" onClick={logout}>Disconnect</button>
-              <LocationResultsView pos={mapPos} data={sweepData} vehicleInfo={vehicleInfo} />
+              <LocationResultsView pos={mapPos} data={sweepData} vehicleInfo={vehicleInfo} popupLabel="Your Car" />
             </>
           ) : (
             <>
@@ -796,6 +789,11 @@ export default function App() {
             Drag the pin to test any Somerville address. Same sweep + side-detection results as the Tesla flow, just driven by you instead of your car.
             {manualLoading && <span style={{ marginLeft: 6, fontStyle: 'italic' }}>(checking…)</span>}
           </p>
+          {manualSweepData && !manualSweepData.found && (
+            <div className="card" style={{ marginBottom: 12, fontSize: '0.85rem', color: '#8b949e' }}>
+              {manualSweepData.message || 'No sweeping data for this location.'}
+            </div>
+          )}
           <LocationResultsView
             pos={manualPos}
             data={manualSweepData}

@@ -45,21 +45,14 @@ const brotliPrecompress = {
   enforce: 'post',
   closeBundle() {
     const distDir = join(process.cwd(), 'dist');
-    const compress = (path) => {
-      const buf = readFileSync(path);
-      if (buf.length < 1024) return;
-      writeFileSync(path + '.br', brotliCompressSync(buf, {
+    for (const name of readdirSync(distDir, { recursive: true })) {
+      if (!/\.(js|css|html|svg)$/i.test(name)) continue;
+      const buf = readFileSync(join(distDir, name));
+      if (buf.length < 1024) continue;
+      writeFileSync(join(distDir, name) + '.br', brotliCompressSync(buf, {
         params: { [constants.BROTLI_PARAM_QUALITY]: 11, [constants.BROTLI_PARAM_SIZE_HINT]: buf.length },
       }));
-    };
-    const walk = (dir) => {
-      for (const e of readdirSync(dir, { withFileTypes: true })) {
-        const p = join(dir, e.name);
-        if (e.isDirectory()) walk(p);
-        else if (/\.(js|css|html|svg)$/i.test(e.name)) compress(p);
-      }
-    };
-    walk(distDir);
+    }
   },
 };
 

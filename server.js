@@ -1,6 +1,6 @@
 import express from 'express';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname, join, extname } from 'path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, mkdirSync, statSync } from 'fs';
 import cron from 'node-cron';
@@ -419,7 +419,7 @@ async function whichSide(lat, lng) {
           if (!c || !hn) continue;
           const m = String(hn).match(/(\d+)/);
           if (!m) continue;
-          buildings.push({ num: parseInt(m[1], 10), lat: c.lat, lng: c.lng != null ? c.lng : c.lon });
+          buildings.push({ num: parseInt(m[1], 10), lat: c.lat, lng: c.lon });
         }
       }
     } catch {}
@@ -511,8 +511,8 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
 
 app.post('/api/which-side', wrap(async (req, res) => {
   const { lat, lng } = req.body;
-  if (typeof lat !== 'number' || typeof lng !== 'number') {
-    return res.status(400).json({ detail: 'lat and lng required as numbers' });
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    return res.status(400).json({ detail: 'lat and lng required as finite numbers in valid range' });
   }
   res.json(await whichSide(lat, lng));
 }));
@@ -520,8 +520,8 @@ app.post('/api/which-side', wrap(async (req, res) => {
 app.post('/api/sweep-check', wrap(async (req, res) => {
   const { address, today_date, past_noon, lat, lng } = req.body;
   if (!address) return res.status(400).json({ detail: 'Address required' });
-  if (typeof lat !== 'number' || typeof lng !== 'number') {
-    return res.status(400).json({ detail: 'lat and lng required as numbers' });
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    return res.status(400).json({ detail: 'lat and lng required as finite numbers in valid range' });
   }
   res.json(await runSweepCheck({ address, today_date, past_noon, lat, lng }));
 }));
@@ -812,17 +812,14 @@ app.all('/api/*', (req, res) => res.status(404).json({ detail: 'API endpoint not
 // Serve .br pre-compressed asset when client accepts brotli. Falls
 // through to express.static for the original file otherwise; Caddy's
 // `encode zstd gzip` handles compression for non-br clients.
-const BR_TYPES = { js: 'application/javascript', css: 'text/css', svg: 'image/svg+xml', html: 'text/html' };
+const BR_TYPES = { '.js': 'application/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.html': 'text/html' };
 app.use((req, res, next) => {
   if (req.method !== 'GET' && req.method !== 'HEAD') return next();
-  const m = req.path.match(/\.(js|css|svg|html)$/i);
-  if (!m) return next();
-  if (!(req.headers['accept-encoding'] || '').includes('br')) return next();
+  const type = BR_TYPES[extname(req.path).toLowerCase()];
+  if (!type || !(req.headers['accept-encoding'] || '').includes('br')) return next();
   const brPath = join(__dirname, 'dist', req.path) + '.br';
   try { statSync(brPath); } catch { return next(); }
-  res.setHeader('Content-Encoding', 'br');
-  res.setHeader('Vary', 'Accept-Encoding');
-  res.setHeader('Content-Type', BR_TYPES[m[1].toLowerCase()] + '; charset=utf-8');
+  res.set({ 'Content-Encoding': 'br', 'Vary': 'Accept-Encoding', 'Content-Type': `${type}; charset=utf-8` });
   res.sendFile(brPath);
 });
 app.use(express.static(join(__dirname, 'dist')));
