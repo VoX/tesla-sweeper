@@ -152,7 +152,7 @@ function LocationResultsView({ pos, draggable, onPinMove, data, vehicleInfo, pop
       <MapView
         lat={pos?.lat}
         lng={pos?.lng}
-        street={pos?.street || data?.place_name}
+        street={pos?.street}
         segment={data?.side_detection?.segment}
         draggable={draggable}
         onPinMove={onPinMove}
@@ -381,7 +381,7 @@ export default function App() {
   const [tab, setTab] = useState(() => {
     const q = new URLSearchParams(window.location.search);
     const p = q.get('tab');
-    if (['address', 'app', 'test'].includes(p)) return p;
+    if (['address', 'app', 'test', 'manual'].includes(p)) return p;
     return q.get('address') ? 'address' : 'app';
   });
   // Persist active tab to URL — refresh/share preserves the view.
@@ -395,13 +395,13 @@ export default function App() {
     if (tab !== 'address') url.searchParams.delete('address');
     window.history.replaceState({}, '', url);
   }, [tab]);
-  // Clear results on tab switch — address tab and app tab share the
-  // same sweepData/mapPos/vehicleInfo state, so without this the
-  // address result bleeds into the app tab and vice-versa.
+  // Clear results on tab switch — tabs share state and we don't want
+  // address/app/manual results bleeding across.
   useEffect(() => {
     setSweepData(null);
     setMapPos(null);
     setVehicleInfo(null);
+    setManualSweepData(null);
   }, [tab]);
   const [loading, setLoading] = useState(false);
   // Sub-message shown under the loading state. Used to surface
@@ -425,6 +425,13 @@ export default function App() {
   });
 
   const [address, setAddress] = useState(() => new URLSearchParams(window.location.search).get('address') || '');
+
+  // Manual tab state — drag-to-set location, sweep + side detection
+  // re-fetched on each pin move. Default centered on Somerville.
+  const [manualPos, setManualPos] = useState({ lat: 42.385081, lng: -71.107841, street: 'Drag the pin to test' });
+  const [manualSweepData, setManualSweepData] = useState(null);
+  const [manualLoading, setManualLoading] = useState(false);
+  const manualInflightRef = useRef(null);
 
   const [slackUserId, setSlackUserId] = useState(() => localStorage.getItem('tesla_slack_user_id') || '');
   const [subscriptions, setSubscriptions] = useState(null);
@@ -681,6 +688,38 @@ export default function App() {
     finally { setLoading(false); }
   };
 
+  // Manual-tab pin handler. Reverse-geocodes to get a street name for
+  // the Recollect lookup, then calls /api/sweep-check with coords —
+  // sweep result + side_detection come back in one round trip.
+  // AbortController on each call so fast drags resolve in pin order.
+  const handleManualPinMove = useCallback(async (lat, lng) => {
+    manualInflightRef.current?.abort();
+    const ctrl = new AbortController();
+    manualInflightRef.current = ctrl;
+    setManualLoading(true);
+    try {
+      const geo = await post('reverse-geocode', { lat, lng }, ctrl.signal);
+      const addr = [geo.house_number, geo.street].filter(Boolean).join(' ') || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      if (!ctrl.signal.aborted) setManualPos({ lat, lng, street: geo.street || 'Unknown' });
+      const data = await post('sweep-check', {
+        address: addr, today_date: clientToday(), past_noon: new Date().getHours() >= 12, lat, lng,
+      }, ctrl.signal);
+      if (!ctrl.signal.aborted) setManualSweepData(data);
+    } catch (e) {
+      if (e.name !== 'AbortError') setError(e.message);
+    } finally {
+      if (!ctrl.signal.aborted) setManualLoading(false);
+    }
+  }, []);
+
+  // Initial probe when Manual tab is opened with no data yet.
+  useEffect(() => {
+    if (tab === 'manual' && !manualSweepData && !manualLoading) {
+      handleManualPinMove(manualPos.lat, manualPos.lng);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+
   const handleCheckCar = async (vid) => {
     if (!tokens?.access_token) return;
     if (loading) return;
@@ -808,6 +847,7 @@ export default function App() {
   const tabs = [
     { id: 'address', icon: '\uD83D\uDCCD', label: 'Address' },
     { id: 'app', icon: '\uD83D\uDE97', label: 'Tesla Login' },
+    { id: 'manual', icon: '\uD83D\uDDFA\uFE0F', label: 'Manual' },
     { id: 'test', icon: '\uD83E\uDDEA', label: 'Test Side' },
   ];
 
@@ -881,6 +921,22 @@ export default function App() {
               {oauthStatus && <div className="oauth-status">{oauthStatus}</div>}
             </>
           )}
+        </div>
+      )}
+
+      {tab === 'manual' && (
+        <div role="tabpanel">
+          <p style={{ fontSize: '0.85rem', color: '#8b949e', marginBottom: 12 }}>
+            Drag the pin to test any Somerville address. Same sweep + side-detection results as the Tesla flow, just driven by you instead of your car.
+            {manualLoading && <span style={{ marginLeft: 6, fontStyle: 'italic' }}>(checking…)</span>}
+          </p>
+          <LocationResultsView
+            pos={manualPos}
+            data={manualSweepData}
+            draggable={true}
+            onPinMove={handleManualPinMove}
+            popupLabel="Pin location"
+          />
         </div>
       )}
 
