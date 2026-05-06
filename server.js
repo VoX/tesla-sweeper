@@ -388,6 +388,17 @@ app.post('/api/check', wrap(async (req, res) => {
   const { token, vehicle_id } = req.body;
   if (!token) return res.status(400).json({ detail: 'Token required' });
 
+  // Stub short-circuit: skip Tesla wake/poll entirely.
+  if (isStubVehicle(vehicle_id)) {
+    console.log('[check] returning stub vehicle data');
+    return res.json({
+      vehicle_name: STUB_VEHICLE_NAME,
+      latitude: STUB_VEHICLE_LAT,
+      longitude: STUB_VEHICLE_LNG,
+      battery_level: 78,
+    });
+  }
+
   const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 
   let vid = vehicle_id;
