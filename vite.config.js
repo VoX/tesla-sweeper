@@ -4,17 +4,32 @@ import { brotliCompressSync, constants } from 'zlib';
 import { readdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
-// Vite injects <script type="module"> before <link rel="stylesheet">,
-// which triggers Firefox's "Layout was forced before stylesheets
-// loaded" warning when the bundle starts reading layout (Leaflet's
-// map-init does this). Move stylesheet links above script tags.
-const cssBeforeScript = {
-  name: 'css-before-script',
-  transformIndexHtml(html) {
-    const links = [];
-    const stripped = html.replace(/\s*<link[^>]+rel=["']stylesheet["'][^>]*>/g, m => (links.push(m.trim()), ''));
-    if (!links.length) return html;
-    return stripped.replace(/(\s*)<script\s+type="module"/, `$1${links.join('$1')}$1<script type="module"`);
+// Inline the (small) main CSS bundle directly into index.html as a
+// <style> tag. Eliminates the CSS round trip and the brief flash of
+// unstyled content firefox flagged (module scripts don't strictly
+// block on preceding <link rel=stylesheet>, so even with the link
+// before the script there's a visible unstyled frame). The lazy-
+// loaded leaflet CSS chunk stays external — it's only fetched when a
+// map renders and FOUC there is invisible (no map = no leaflet css
+// usage).
+const inlineMainCss = {
+  name: 'inline-main-css',
+  apply: 'build',
+  enforce: 'post',
+  transformIndexHtml: {
+    order: 'post',
+    handler(html, ctx) {
+      // Pull the main CSS asset (the entry stylesheet that vite would
+      // have linked) and replace its <link> with an inline <style>.
+      const bundle = ctx.bundle || {};
+      const linkRe = /<link[^>]+rel=["']stylesheet["'][^>]*href=["']([^"']+)["'][^>]*>/g;
+      return html.replace(linkRe, (full, href) => {
+        const bundleKey = href.replace(/^.*?\/assets\//, 'assets/');
+        const css = bundle[bundleKey];
+        if (!css || css.type !== 'asset' || typeof css.source !== 'string') return full;
+        return `<style>${css.source}</style>`;
+      });
+    },
   },
 };
 
@@ -49,7 +64,7 @@ const brotliPrecompress = {
 };
 
 export default defineConfig({
-  plugins: [preact(), cssBeforeScript, brotliPrecompress],
+  plugins: [preact(), inlineMainCss, brotliPrecompress],
   base: '/sweeper/',
   server: {
     port: 5173,
