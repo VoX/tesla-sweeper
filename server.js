@@ -70,6 +70,19 @@ const FETCH_TIMEOUT = 12000;
 const VEHICLE_DATA_QS = 'endpoints=location_data%3Bcharge_state';
 const SLACK_USER_ID_RE = /^U[A-Z0-9]+$/;
 
+// Stub test vehicle — env-flag-gated mock used when the Tesla API
+// returns no vehicles. Lets developers / VoX exercise the full app
+// flow (vehicles list → check car → enable notifications → cron DM)
+// without owning a real Tesla. See docs/stub-vehicle-plan.md.
+const STUB_VEHICLE_ENABLED = process.env.STUB_VEHICLE_ENABLED === '1';
+const STUB_VEHICLE_ID = 999999999999999;          // 15 digits — real Tesla IDs are 16
+const STUB_VEHICLE_VIN = 'STUBTEST00000000000';
+const STUB_VEHICLE_LAT = parseFloat(process.env.STUB_VEHICLE_LAT) || 42.385081;
+const STUB_VEHICLE_LNG = parseFloat(process.env.STUB_VEHICLE_LNG) || -71.107841;
+const STUB_VEHICLE_NAME = process.env.STUB_VEHICLE_NAME || 'Test Vehicle';
+const STUB_REFRESH_TOKEN = 'STUB_REFRESH_TOKEN';   // sentinel persisted in subscriptions.json; cron branches on it
+function isStubVehicle(id) { return STUB_VEHICLE_ENABLED && String(id) === String(STUB_VEHICLE_ID); }
+
 const wrap = (fn) => (req, res) => fn(req, res).catch(e => {
   console.error(`${req.path}:`, e.message);
   res.status(502).json({ detail: 'Upstream service error' });
@@ -362,9 +375,12 @@ app.post('/api/vehicles', wrap(async (req, res) => {
 
   const vehicles = (await vehiclesRes.json()).response || [];
   console.log(`[vehicles] Found ${vehicles.length} vehicle(s)`);
-  res.json({
-    vehicles: vehicles.map(v => ({ id: v.id, name: v.display_name || 'Unknown', vin: v.vin, state: v.state })),
-  });
+  const out = vehicles.map(v => ({ id: v.id, name: v.display_name || 'Unknown', vin: v.vin, state: v.state }));
+  if (STUB_VEHICLE_ENABLED && out.length === 0) {
+    console.log('[vehicles] injecting stub test vehicle');
+    out.push({ id: STUB_VEHICLE_ID, name: STUB_VEHICLE_NAME, vin: STUB_VEHICLE_VIN, state: 'online' });
+  }
+  res.json({ vehicles: out });
 }));
 
 // Get location for a specific vehicle
