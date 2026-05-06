@@ -427,6 +427,7 @@ export default function App() {
         vehicle_id: vid,
         vehicle_name: veh?.name || 'Unknown',
         slack_user_id: slackUserId,
+        session: sessionStorage.getItem('slack_session') || '',
       });
       await fetchSubscriptions(slackUserId);
       setNotifError('');
@@ -447,7 +448,7 @@ export default function App() {
     setNotifLoading(true);
     setNotifError('');
     try {
-      await post('notifications/disable', { id: subId, slack_user_id: slackUserId });
+      await post('notifications/disable', { id: subId, slack_user_id: slackUserId, session: sessionStorage.getItem('slack_session') || '' });
       await fetchSubscriptions(slackUserId);
     } catch (e) {
       setNotifError(e.message);
@@ -665,6 +666,11 @@ export default function App() {
         .then(data => {
           if (!data.slack_user_id) throw new Error('Slack returned no user_id');
           setSlackUserId(data.slack_user_id);
+          // Stash the HMAC session token paired with the slack id so
+          // /enable + /disable can prove the requester owns it.
+          // 30-min TTL — the user has to re-sign-in if they sit on
+          // the page longer than that before subscribing.
+          if (data.session) sessionStorage.setItem('slack_session', data.session);
           setNotifError('');
           setOauthStatus(`\u{1F510} Signed in as ${data.name || data.slack_user_id} — click Enable Daily Notifications to subscribe.`);
         })

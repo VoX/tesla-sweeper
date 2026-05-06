@@ -1,7 +1,7 @@
 import express from 'express';
 import { fileURLToPath } from 'url';
 import { dirname, join, extname } from 'path';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual, createHmac } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, mkdirSync, statSync } from 'fs';
 import cron from 'node-cron';
 
@@ -24,6 +24,38 @@ const SLACK_CLIENT_ID = process.env.SLACK_CLIENT_ID || '';
 const SLACK_CLIENT_SECRET = process.env.SLACK_CLIENT_SECRET || '';
 const SLACK_REDIRECT_URI = process.env.SLACK_REDIRECT_URI || '';
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || '';
+
+// HMAC key for short-lived session tokens issued after a verified
+// Slack OIDC callback. Without one, every restart invalidates active
+// sessions. Generate with `openssl rand -hex 32` and put in .env.
+const SESSION_HMAC_KEY = process.env.SESSION_HMAC_KEY || '';
+if (!SESSION_HMAC_KEY) console.warn('[boot] SESSION_HMAC_KEY unset — slack→/enable session gate disabled, /enable will reject every request');
+const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min
+
+// Sign a "this requester just proved ownership of slack_user_id"
+// claim. Format: "${slack_user_id}.${exp_ms}.${hmac_b64u}". Stateless;
+// /enable + /disable verify it before persisting anything.
+function signSession(slackUserId) {
+  if (!SESSION_HMAC_KEY) return '';
+  const exp = Date.now() + SESSION_TTL_MS;
+  const payload = `${slackUserId}.${exp}`;
+  const mac = createHmac('sha256', SESSION_HMAC_KEY).update(payload).digest('base64url');
+  return `${payload}.${mac}`;
+}
+
+function verifySession(token, slackUserId) {
+  if (!SESSION_HMAC_KEY || !token || typeof token !== 'string') return false;
+  const parts = token.split('.');
+  if (parts.length !== 3) return false;
+  const [user, exp, mac] = parts;
+  if (user !== slackUserId) return false;
+  const expNum = parseInt(exp, 10);
+  if (!Number.isFinite(expNum) || expNum < Date.now()) return false;
+  const expected = createHmac('sha256', SESSION_HMAC_KEY).update(`${user}.${exp}`).digest('base64url');
+  const a = Buffer.from(mac), b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
 
 const TESLA_BASE = 'https://fleet-api.prd.na.vn.cloud.tesla.com';
 const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
@@ -593,6 +625,10 @@ app.post('/api/slack/oauth/callback', wrap(async (req, res) => {
     team_id: claims['https://slack.com/team_id'],
     email: claims.email,
     name: claims.name,
+    // Short-lived HMAC token tied to the verified slack_user_id —
+    // SPA passes it on subsequent /enable + /disable calls so the
+    // server can prove the requester actually owns the slack id.
+    session: signSession(claims['https://slack.com/user_id']),
   });
 }));
 
@@ -600,9 +636,16 @@ app.post('/api/slack/oauth/callback', wrap(async (req, res) => {
 // refresh_token server-side so a 12pm ET cron can wake the car, check
 // the sweeping schedule, and DM via Slack on T-3/T-2/T-1.
 app.post('/api/notifications/enable', wrap(async (req, res) => {
-  const { refresh_token, vehicle_id, vehicle_name, slack_user_id } = req.body;
+  const { refresh_token, vehicle_id, vehicle_name, slack_user_id, session } = req.body;
   if (!refresh_token || !slack_user_id || !vehicle_id) {
     return res.status(400).json({ detail: 'refresh_token, slack_user_id, and vehicle_id are required' });
+  }
+  // Confused-deputy gate: the slack_user_id has to come paired with a
+  // server-issued HMAC session that was minted on a verified Slack
+  // OIDC callback for that same id. Otherwise anyone with a Tesla
+  // refresh_token could subscribe arbitrary slack_user_ids.
+  if (!verifySession(session, slack_user_id)) {
+    return res.status(403).json({ detail: 'Slack session expired or mismatched. Sign in with Slack again.' });
   }
   if (!SLACK_USER_ID_RE.test(slack_user_id)) {
     return res.status(400).json({ detail: 'slack_user_id should look like U060NLFUM' });
@@ -656,11 +699,13 @@ app.post('/api/notifications/enable', wrap(async (req, res) => {
 }));
 
 app.post('/api/notifications/disable', wrap(async (req, res) => {
-  const { id, slack_user_id } = req.body;
+  const { id, slack_user_id, session } = req.body;
   if (!id || !slack_user_id) return res.status(400).json({ detail: 'id and slack_user_id required' });
+  if (!verifySession(session, slack_user_id)) {
+    return res.status(403).json({ detail: 'Slack session expired or mismatched. Sign in with Slack again.' });
+  }
   const subs = loadSubs();
   const before = subs.length;
-  // slack_user_id must match — prevents one user from disabling another's sub by guessing the id.
   const filtered = subs.filter(s => !(s.id === id && s.slack_user_id === slack_user_id));
   if (filtered.length === before) return res.status(404).json({ detail: 'Subscription not found' });
   saveSubs(filtered);
