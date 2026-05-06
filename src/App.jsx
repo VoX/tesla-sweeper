@@ -757,7 +757,7 @@ export default function App() {
                   <label>Select Vehicle</label>
                   <select value={selectedVehicle || ''} onChange={e => setSelectedVehicle(e.target.value)} style={{width: '100%', padding: '10px 12px', background: '#161b22', border: '1px solid #30363d', borderRadius: 6, color: '#c9d1d9', fontSize: '0.9rem'}}>
                     <option value="" disabled>Choose a vehicle...</option>
-                    {vehicles.map(v => <option key={v.id} value={v.id}>{v.name} ({v.state})</option>)}
+                    {vehicles.map(v => <option key={v.id} value={v.id}>{v.name}{v.id === 999999999999999 ? ' (test)' : ''} ({v.state})</option>)}
                   </select>
                 </div>
               )}
