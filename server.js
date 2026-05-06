@@ -685,11 +685,8 @@ app.post('/api/notifications/enable', wrap(async (req, res) => {
   }
   // Stub bypass: skip Tesla refresh + vehicle-id lookup. The cron
   // path branches on STUB_REFRESH_TOKEN to short-circuit too.
-  const stub = isStubVehicle(vehicle_id);
-  let storedRefreshToken;
-  if (stub) {
-    storedRefreshToken = STUB_REFRESH_TOKEN;
-  } else {
+  let storedRefreshToken = STUB_REFRESH_TOKEN;
+  if (!isStubVehicle(vehicle_id)) {
     // Validate the refresh_token by doing one round-trip. Catches typos
     // and revoked tokens before we persist garbage.
     let rotated;
@@ -699,15 +696,14 @@ app.post('/api/notifications/enable', wrap(async (req, res) => {
       return res.status(400).json({ detail: 'Refresh token invalid: ' + e.message });
     }
     // Confirm the supplied vehicle_id is reachable with this token —
-    // otherwise the cron 404s daily forever.
+    // otherwise the cron 404s daily forever. Tesla vehicle IDs are
+    // 16-digit ints above MAX_SAFE_INTEGER, so JSON round-tripping
+    // can lose precision and === will silently miss. Compare as strings.
     try {
       const vr = await fetchWithTimeout(`${TESLA_BASE}/api/1/vehicles`, {
         headers: { Authorization: `Bearer ${rotated.access_token}`, 'Content-Type': 'application/json' },
       });
       const list = vr.ok ? ((await vr.json()).response || []) : [];
-      // Tesla vehicle IDs are 16-digit ints above MAX_SAFE_INTEGER, so
-      // JSON round-tripping can lose precision and === will silently
-      // miss. Compare as strings.
       if (!list.some(v => String(v.id) === String(vehicle_id))) {
         return res.status(400).json({ detail: 'vehicle_id not on this Tesla account' });
       }
@@ -718,7 +714,9 @@ app.post('/api/notifications/enable', wrap(async (req, res) => {
   }
   const subs = loadSubs();
   // One subscription per (slack_user_id, vehicle_id) — re-enable replaces.
-  const filtered = subs.filter(s => !(s.slack_user_id === slack_user_id && s.vehicle_id === vehicle_id));
+  // String-coerce vehicle_id since Tesla IDs may round-trip as
+  // numbers in older entries while the SPA sends strings.
+  const filtered = subs.filter(s => !(s.slack_user_id === slack_user_id && String(s.vehicle_id) === String(vehicle_id)));
   const sub = {
     id: randomBytes(8).toString('hex'),
     slack_user_id,
