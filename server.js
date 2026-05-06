@@ -811,10 +811,19 @@ async function runNotifications() {
         out.ok = false;
         out.error = e.message;
       }
+      // Track consecutive_failures so we can DM the user once their
+      // sub stops working (Tesla token revoked, vehicle removed, etc).
+      // Reset on success.
+      const prevFailures = sub.consecutive_failures || 0;
+      const nextFailures = out.ok ? 0 : prevFailures + 1;
       patchSub(sub.id, {
         last_check_at: new Date().toISOString(),
         last_result: { ok: out.ok, days_until_next: out.days_until_next, error: out.error },
+        consecutive_failures: nextFailures,
       });
+      out.consecutive_failures = nextFailures;
+      out.prev_failures = prevFailures;
+      out.last_dm_error_at = sub.last_dm_error_at || null;
       results.push(out);
     }
     for (const out of results) {
@@ -822,6 +831,22 @@ async function runNotifications() {
       const dm = await postSlackDM(out.slack_user_id, formatSweepDM(out));
       out.dm_sent = dm.ok;
       out.dm_error = dm.error || null;
+    }
+    // Stuck-sub notice: DM the user once after the failure count
+    // crosses the threshold, then once per day if it stays stuck.
+    // Avoids spamming a user whose token is permanently dead — they
+    // only hear about it once until they re-enable.
+    const STUCK_FAIL_THRESHOLD = 3;
+    const STUCK_DM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+    for (const out of results) {
+      if (out.ok) continue;
+      if (out.consecutive_failures < STUCK_FAIL_THRESHOLD) continue;
+      const lastErrTs = out.last_dm_error_at ? Date.parse(out.last_dm_error_at) : 0;
+      if (Date.now() - lastErrTs < STUCK_DM_COOLDOWN_MS) continue;
+      const dm = await postSlackDM(out.slack_user_id,
+        `:warning: Tesla sweeper notifications for *${out.vehicle_name}* have been failing for ${out.consecutive_failures} runs (last error: ${out.error}). Re-enable at https://claw.bitvox.me/sweeper/.`);
+      out.error_dm_sent = dm.ok;
+      if (dm.ok) patchSub(out.sub_id, { last_dm_error_at: new Date().toISOString() });
     }
     // Only mark "ran today" if at least one sub processed successfully.
     // A total-outage day shouldn't suppress tomorrow's missed-run recovery.
@@ -886,8 +911,9 @@ function startNotificationCron() {
       const dmsOk = r.results.filter(o => o.dm_sent).length;
       const errs = r.results.filter(o => !o.ok);
       const dmFails = r.results.filter(o => o.dm_sent === false && shouldNotifySweep(o));
-      console.log(`[cron] ran ${r.results.length} sub(s), sent ${dmsOk} DM(s), ${errs.length} sub error(s), ${dmFails.length} DM failure(s)`);
-      for (const o of errs) console.warn(`[cron] sub ${o.sub_id} (${o.vehicle_name}) error: ${o.error}`);
+      const stuckDms = r.results.filter(o => o.error_dm_sent).length;
+      console.log(`[cron] ran ${r.results.length} sub(s), sent ${dmsOk} DM(s), ${stuckDms} stuck-sub DM(s), ${errs.length} sub error(s), ${dmFails.length} DM failure(s)`);
+      for (const o of errs) console.warn(`[cron] sub ${o.sub_id} (${o.vehicle_name}) error: ${o.error} (consecutive_failures=${o.consecutive_failures})`);
       for (const o of dmFails) console.warn(`[cron] sub ${o.sub_id} (${o.vehicle_name}) DM failed: ${o.dm_error}`);
     } catch (e) { console.error('[cron] runNotifications failed:', e); }
   }, { timezone: 'America/New_York' });
