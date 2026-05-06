@@ -313,10 +313,13 @@ export default function App() {
   });
   // Persist active tab to URL — refresh/share preserves the view.
   // Drop ?tab=app since it's the default; keeps URLs clean.
+  // Also drop ?address= when leaving the address tab — the param
+  // belongs to that tab's flow only.
   useEffect(() => {
     const url = new URL(window.location);
     if (tab === 'app') url.searchParams.delete('tab');
     else url.searchParams.set('tab', tab);
+    if (tab !== 'address') url.searchParams.delete('address');
     window.history.replaceState({}, '', url);
   }, [tab]);
   // Clear results on tab switch — address tab and app tab share the
