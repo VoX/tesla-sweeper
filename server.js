@@ -765,8 +765,6 @@ app.get('/api/notifications/status', (req, res) => {
   res.json({ subscriptions: loadSubs().filter(s => s.slack_user_id === slack_user_id).map(publicSub) });
 });
 
-// Cron fires at noon ET so past_noon is always false — the notifier
-// filters days_until_next ∈ {1,2,3} anyway, never sweep-day.
 function bearerOk(authHeader, token) {
   if (!token) return false;
   const givenBuf = Buffer.from(authHeader);
@@ -932,7 +930,7 @@ async function runNotifications({ mode = 'daily' } = {}) {
         const lastErrTs = out.last_dm_error_at ? Date.parse(out.last_dm_error_at) : 0;
         if (Date.now() - lastErrTs < STUCK_DM_COOLDOWN_MS) continue;
         const dm = await postSlackDM(out.slack_user_id,
-          `:warning: Tesla sweeper notifications for *${out.vehicle_name}* have been failing for ${out.consecutive_failures} runs (last error: ${out.error}). Re-enable at https://claw.bitvox.me/sweeper/.`);
+          `:warning: *${out.vehicle_name}* sweeper notifications have been failing for ${out.consecutive_failures} runs. Last error: \`${out.error}\`. Re-enable at <https://claw.bitvox.me/sweeper/>.`);
         out.error_dm_sent = dm.ok;
         if (dm.ok) patchSub(out.sub_id, { last_dm_error_at: new Date().toISOString() });
       }
@@ -1047,9 +1045,27 @@ function maybeRecoverMissedRun() {
   runNotifications().catch(e => console.error('[cron] missed-run recovery failed:', e));
 }
 
+// Symmetric digest recovery: if today is Sunday past 8PM ET and we
+// haven't run a digest in this calendar week, fire one. Otherwise a
+// boot across Sunday 8PM silently skips that week's digest forever.
+function maybeRecoverMissedDigest() {
+  const now = new Date();
+  const fmtDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' });
+  const fmtParts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short', hour: '2-digit', hour12: false });
+  const parts = Object.fromEntries(fmtParts.formatToParts(now).map(p => [p.type, p.value]));
+  if (parts.weekday !== 'Sun' || parseInt(parts.hour, 10) < 20) return;
+  const todayET = fmtDate.format(now);
+  const last = loadStore().last_digest_run_at || null;
+  const lastDateET = last ? fmtDate.format(new Date(last)) : null;
+  if (lastDateET === todayET) return;
+  console.log(`[cron] recovering missed digest (last: ${lastDateET || 'never'}, today: ${todayET})`);
+  runNotifications({ mode: 'weekly' }).catch(e => console.error('[cron] missed-digest recovery failed:', e));
+}
+
 const PORT = process.env.PORT || 20040;
 app.listen(PORT, '127.0.0.1', () => {
   console.log(`Tesla Sweeper on http://127.0.0.1:${PORT}`);
   startNotificationCron();
   maybeRecoverMissedRun();
+  maybeRecoverMissedDigest();
 });
