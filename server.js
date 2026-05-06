@@ -816,19 +816,28 @@ async function runNotifications() {
     for (const sub of subs) {
       const out = { sub_id: sub.id, slack_user_id: sub.slack_user_id, vehicle_id: sub.vehicle_id, vehicle_name: sub.vehicle_name };
       try {
-        const rotated = await teslaTokenExchange({ grant_type: 'refresh_token', client_id: TESLA_APP_CLIENT_ID, refresh_token: sub.refresh_token });
-        // Tesla rotates refresh_tokens on each exchange; persist
-        // immediately so a crash later in the loop doesn't leave us
-        // with a now-revoked token next run.
-        if (rotated.refresh_token && rotated.refresh_token !== sub.refresh_token) {
-          patchSub(sub.id, { refresh_token: rotated.refresh_token });
-        }
-        const headers = { Authorization: `Bearer ${rotated.access_token}`, 'Content-Type': 'application/json' };
+        let latitude, longitude;
+        if (STUB_VEHICLE_ENABLED && sub.refresh_token === STUB_REFRESH_TOKEN) {
+          // Stub: skip Tesla token refresh + vehicle_data wake-and-poll.
+          // Reverse-geocode + Recollect + Slack DM still run for real.
+          latitude = STUB_VEHICLE_LAT;
+          longitude = STUB_VEHICLE_LNG;
+          out.battery_level = 78;
+        } else {
+          const rotated = await teslaTokenExchange({ grant_type: 'refresh_token', client_id: TESLA_APP_CLIENT_ID, refresh_token: sub.refresh_token });
+          // Tesla rotates refresh_tokens on each exchange; persist
+          // immediately so a crash later in the loop doesn't leave us
+          // with a now-revoked token next run.
+          if (rotated.refresh_token && rotated.refresh_token !== sub.refresh_token) {
+            patchSub(sub.id, { refresh_token: rotated.refresh_token });
+          }
+          const headers = { Authorization: `Bearer ${rotated.access_token}`, 'Content-Type': 'application/json' };
 
-        const locData = await fetchVehicleData(headers, sub.vehicle_id);
-        const { latitude, longitude } = locData.response?.drive_state || {};
+          const locData = await fetchVehicleData(headers, sub.vehicle_id);
+          ({ latitude, longitude } = locData.response?.drive_state || {});
+          out.battery_level = locData.response?.charge_state?.battery_level ?? null;
+        }
         if (latitude == null || longitude == null) throw new Error('No vehicle location');
-        out.battery_level = locData.response?.charge_state?.battery_level ?? null;
 
         const geo = await reverseGeocodeLocation(latitude, longitude);
         const addr = [geo.house_number, geo.street].filter(Boolean).join(' ');
