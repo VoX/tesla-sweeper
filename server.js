@@ -4,6 +4,7 @@ import { dirname, join, extname } from 'path';
 import { randomBytes, timingSafeEqual, createHmac } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, mkdirSync, statSync } from 'fs';
 import cron from 'node-cron';
+import { classifyWeek, shouldDispatchPlan, formatPlanDM, formatWeeklyDigest } from './lib/notification-planner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -776,25 +777,17 @@ function bearerOk(authHeader, token) {
   return timingSafeEqual(givenBuf, expectedBuf);
 }
 
-function formatSweepDM(out) {
-  const days = out.days_until_next;
-  const event = out.next_event || {};
-  const dayLabel = event.date
-    ? new Date(event.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' })
-    : '';
-  const sideLabel = event.side === 'both' ? 'both sides' : `*${event.side}* side`;
-  return `:broom: *${out.vehicle_name}* — sweep in ${days} day${days === 1 ? '' : 's'} on the ${sideLabel}.
-${dayLabel}, ${event.time}
-:round_pushpin: ${out.address || 'address unresolved'}
-<https://claw.bitvox.me/sweeper/>`;
-}
-
-// Skip DM when the sweep covers a side opposite the user's parked side
-// — no point pinging if they don't have to move.
-function shouldNotifySweep(out) {
-  const side = out.next_event?.side;
-  return !!(out.ok && out.found && [1, 2, 3].includes(out.days_until_next)
-    && side && (side === 'both' || side === out.car_side));
+// Build the per-sub plan (class + windowEvents + primaryEvent) using
+// the same classifier the message formatters consume. Returns null
+// when the sweep lookup itself failed so callers don't try to DM.
+function buildPlan(out, todayET) {
+  if (!out.ok || !out.found) return null;
+  return classifyWeek({
+    events: out.sweep_events || [],
+    carSide: out.car_side,
+    sideDetection: out.side_detection,
+    todayET,
+  });
 }
 
 // Single-flight guard. Both the in-process cron and the HTTP /run
@@ -812,11 +805,23 @@ function patchSub(subId, patch) {
 }
 
 let runningNotifications = null;
-async function runNotifications() {
-  if (runningNotifications) return runningNotifications;
+let runningMode = null;
+async function runNotifications({ mode = 'daily' } = {}) {
+  if (mode !== 'daily' && mode !== 'weekly') {
+    throw new Error(`runNotifications: invalid mode '${mode}'`);
+  }
+  if (runningNotifications) {
+    if (runningMode === mode) return runningNotifications;
+    // Different mode in flight — refuse rather than return the wrong-mode
+    // promise. Crons + manual /run surface the error in their handlers.
+    throw new Error(`runNotifications: another run already in flight (mode='${runningMode}')`);
+  }
+  runningMode = mode;
   runningNotifications = (async () => {
     const subs = loadStore().subscriptions || [];
     const results = [];
+    const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+
     for (const sub of subs) {
       const out = { sub_id: sub.id, slack_user_id: sub.slack_user_id, vehicle_id: sub.vehicle_id, vehicle_name: sub.vehicle_name };
       try {
@@ -850,7 +855,7 @@ async function runNotifications() {
 
         const sweep = await runSweepCheck({
           address: addr,
-          today_date: new Date().toISOString().slice(0, 10),
+          today_date: todayET,
           lat: latitude,
           lng: longitude,
         });
@@ -860,7 +865,8 @@ async function runNotifications() {
         out.title = sweep.title || null;
         out.message = sweep.message || null;
         out.car_side = sweep.car_side || null;
-        out.next_event = sweep.sweep_events?.[0] || null;
+        out.sweep_events = sweep.sweep_events || [];
+        out.side_detection = sweep.side_detection || null;
         out.ok = true;
       } catch (e) {
         out.ok = false;
@@ -876,47 +882,63 @@ async function runNotifications() {
       });
       out.last_dm_error_at = sub.last_dm_error_at || null;
       out.last_dm_date = sub.last_dm_date || null;
+      out.last_digest_date = sub.last_digest_date || null;
+      out.plan = buildPlan(out, todayET);
       results.push(out);
     }
-    // Persist last_dm_date (ET YYYY-MM-DD) per sub right after a
-    // successful sweep DM so a service restart between the cron
-    // dispatch and `last_run_at` write can't re-DM the same user.
-    // The in-memory single-flight only protects same-process runs;
-    // maybeRecoverMissedRun on boot would otherwise re-fire the
-    // entire notify loop.
-    const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
-    for (const out of results) {
-      if (!shouldNotifySweep(out)) continue;
-      if (out.last_dm_date === todayET) {
-        out.dm_skipped = 'already-sent-today';
-        continue;
+    // Daily dispatch: per-sub plan classifier picks one of N action
+    // classes; only fire when class != safe AND the soonest event is
+    // 1-3 days out. last_dm_date dedupes across same-day re-runs
+    // (cron + manual /run + missed-run recovery on restart).
+    if (mode === 'daily') {
+      for (const out of results) {
+        if (!out.plan || !shouldDispatchPlan(out.plan)) continue;
+        if (out.last_dm_date === todayET) { out.dm_skipped = 'already-sent-today'; continue; }
+        const dm = await postSlackDM(out.slack_user_id,
+          formatPlanDM({ vehicleName: out.vehicle_name, address: out.address, plan: out.plan }));
+        out.dm_sent = dm.ok;
+        out.dm_error = dm.error || null;
+        if (dm.ok) patchSub(out.sub_id, { last_dm_date: todayET });
       }
-      const dm = await postSlackDM(out.slack_user_id, formatSweepDM(out));
-      out.dm_sent = dm.ok;
-      out.dm_error = dm.error || null;
-      if (dm.ok) patchSub(out.sub_id, { last_dm_date: todayET });
+    } else if (mode === 'weekly') {
+      // Sunday-evening digest: full schedule + recommendation, every
+      // sub regardless of imminence. Separate dedup field so the daily
+      // and weekly cadences don't suppress each other when both fire
+      // the same Sunday.
+      for (const out of results) {
+        if (!out.plan) continue;
+        if (out.last_digest_date === todayET) { out.digest_skipped = 'already-sent-today'; continue; }
+        const dm = await postSlackDM(out.slack_user_id,
+          formatWeeklyDigest({ vehicleName: out.vehicle_name, address: out.address, plan: out.plan }));
+        out.digest_sent = dm.ok;
+        out.digest_error = dm.error || null;
+        if (dm.ok) patchSub(out.sub_id, { last_digest_date: todayET });
+      }
     }
     // Stuck-sub notice: DM once the failure count crosses the threshold,
-    // then once per day while it stays stuck. Avoids spamming a user
-    // whose token is permanently dead.
-    for (const out of results) {
-      if (out.ok || out.consecutive_failures < STUCK_FAIL_THRESHOLD) continue;
-      const lastErrTs = out.last_dm_error_at ? Date.parse(out.last_dm_error_at) : 0;
-      if (Date.now() - lastErrTs < STUCK_DM_COOLDOWN_MS) continue;
-      const dm = await postSlackDM(out.slack_user_id,
-        `:warning: Tesla sweeper notifications for *${out.vehicle_name}* have been failing for ${out.consecutive_failures} runs (last error: ${out.error}). Re-enable at https://claw.bitvox.me/sweeper/.`);
-      out.error_dm_sent = dm.ok;
-      if (dm.ok) patchSub(out.sub_id, { last_dm_error_at: new Date().toISOString() });
+    // then once per day while it stays stuck. Daily-mode only so a Sunday
+    // 8PM digest doesn't double-DM a sub whose token is dead.
+    if (mode === 'daily') {
+      for (const out of results) {
+        if (out.ok || out.consecutive_failures < STUCK_FAIL_THRESHOLD) continue;
+        const lastErrTs = out.last_dm_error_at ? Date.parse(out.last_dm_error_at) : 0;
+        if (Date.now() - lastErrTs < STUCK_DM_COOLDOWN_MS) continue;
+        const dm = await postSlackDM(out.slack_user_id,
+          `:warning: Tesla sweeper notifications for *${out.vehicle_name}* have been failing for ${out.consecutive_failures} runs (last error: ${out.error}). Re-enable at https://claw.bitvox.me/sweeper/.`);
+        out.error_dm_sent = dm.ok;
+        if (dm.ok) patchSub(out.sub_id, { last_dm_error_at: new Date().toISOString() });
+      }
     }
     // Only mark "ran today" if at least one sub processed successfully.
     // A total-outage day shouldn't suppress tomorrow's missed-run recovery.
     if (results.some(r => r.ok)) {
       const store = loadStore();
-      store.last_run_at = new Date().toISOString();
+      if (mode === 'daily') store.last_run_at = new Date().toISOString();
+      else store.last_digest_run_at = new Date().toISOString();
       saveStore(store);
     }
-    return { ran_at: new Date().toISOString(), results };
-  })().finally(() => { runningNotifications = null; });
+    return { ran_at: new Date().toISOString(), mode, results };
+  })().finally(() => { runningNotifications = null; runningMode = null; });
   return runningNotifications;
 }
 
@@ -933,7 +955,12 @@ app.post('/api/notifications/run', wrap(async (req, res) => {
 // in one curl. Cheap, no auth, no PII.
 app.get('/healthz', (req, res) => {
   const store = loadStore();
-  res.json({ ok: true, last_run_at: store.last_run_at || null, sub_count: (store.subscriptions || []).length });
+  res.json({
+    ok: true,
+    last_run_at: store.last_run_at || null,
+    last_digest_run_at: store.last_digest_run_at || null,
+    sub_count: (store.subscriptions || []).length,
+  });
 });
 
 // API 404 catch — must be before the SPA catch-all
@@ -961,15 +988,16 @@ app.get('*', (req, res) => res.sendFile(join(__dirname, 'dist', 'index.html')));
 process.on('uncaughtException', (e) => { console.error('Uncaught:', e); process.exit(1); });
 process.on('unhandledRejection', (e) => console.error('Unhandled rejection:', e));
 
-// Daily noon-ET notification cron. node-cron handles DST via the
-// timezone string, so the calendar expression stays identical year-round.
+// Daily noon-ET notification cron + Sunday-evening digest. node-cron
+// handles DST via the timezone string, so the calendar expressions
+// stay identical year-round.
 function startNotificationCron() {
   cron.schedule('0 12 * * *', async () => {
     console.log('[cron] firing daily notification run');
     try {
-      const r = await runNotifications();
+      const r = await runNotifications({ mode: 'daily' });
       const errs = r.results.filter(o => !o.ok);
-      const dmFails = r.results.filter(o => o.dm_sent === false && shouldNotifySweep(o));
+      const dmFails = r.results.filter(o => o.dm_sent === false && o.plan && shouldDispatchPlan(o.plan));
       const dmsOk = r.results.filter(o => o.dm_sent).length;
       const dmsDup = r.results.filter(o => o.dm_skipped).length;
       const dmsStuck = r.results.filter(o => o.error_dm_sent).length;
@@ -977,6 +1005,20 @@ function startNotificationCron() {
       for (const o of errs) console.warn(`[cron] sub ${o.sub_id} (${o.vehicle_name}) error: ${o.error} (fails=${o.consecutive_failures})`);
       for (const o of dmFails) console.warn(`[cron] sub ${o.sub_id} (${o.vehicle_name}) DM failed: ${o.dm_error}`);
     } catch (e) { console.error('[cron] runNotifications failed:', e); }
+  }, { timezone: 'America/New_York' });
+
+  // Weekly digest — Sunday 8PM ET. Always sends (even for empty weeks)
+  // so the user gets a Sunday-evening planning view of what's coming.
+  cron.schedule('0 20 * * 0', async () => {
+    console.log('[cron] firing weekly digest run');
+    try {
+      const r = await runNotifications({ mode: 'weekly' });
+      const errs = r.results.filter(o => !o.ok);
+      const sent = r.results.filter(o => o.digest_sent).length;
+      const dup = r.results.filter(o => o.digest_skipped).length;
+      console.log(`[cron] digest subs=${r.results.length} sent=${sent} dup=${dup} errs=${errs.length}`);
+      for (const o of errs) console.warn(`[cron] digest sub ${o.sub_id} error: ${o.error}`);
+    } catch (e) { console.error('[cron] weekly digest failed:', e); }
   }, { timezone: 'America/New_York' });
 }
 
