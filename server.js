@@ -2,7 +2,7 @@ import express from 'express';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, renameSync, mkdirSync, statSync } from 'fs';
 import cron from 'node-cron';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -825,6 +825,22 @@ app.get('/healthz', (req, res) => {
 // API 404 catch — must be before the SPA catch-all
 app.all('/api/*', (req, res) => res.status(404).json({ detail: 'API endpoint not found' }));
 
+// Serve .br pre-compressed asset when client accepts brotli. Falls
+// through to express.static for the original file otherwise; Caddy's
+// `encode zstd gzip` handles compression for non-br clients.
+const BR_TYPES = { js: 'application/javascript', css: 'text/css', svg: 'image/svg+xml', html: 'text/html' };
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+  const m = req.path.match(/\.(js|css|svg|html)$/i);
+  if (!m) return next();
+  if (!(req.headers['accept-encoding'] || '').includes('br')) return next();
+  const brPath = join(__dirname, 'dist', req.path) + '.br';
+  try { statSync(brPath); } catch { return next(); }
+  res.setHeader('Content-Encoding', 'br');
+  res.setHeader('Vary', 'Accept-Encoding');
+  res.setHeader('Content-Type', BR_TYPES[m[1].toLowerCase()] + '; charset=utf-8');
+  res.sendFile(brPath);
+});
 app.use(express.static(join(__dirname, 'dist')));
 app.get('*', (req, res) => res.sendFile(join(__dirname, 'dist', 'index.html')));
 

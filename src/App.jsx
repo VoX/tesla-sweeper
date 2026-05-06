@@ -1,12 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
-import L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
-import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png';
-import markerIcon from 'leaflet/dist/images/marker-icon.png';
-import markerShadow from 'leaflet/dist/images/marker-shadow.png';
-
-delete L.Icon.Default.prototype._getIconUrl;
-L.Icon.Default.mergeOptions({ iconUrl: markerIcon, iconRetinaUrl: markerIcon2x, shadowUrl: markerShadow });
+import { loadLeaflet } from './leaflet-loader.js';
 
 const API = import.meta.env.DEV ? '/sweeper/api' : 'api';
 
@@ -71,16 +64,18 @@ function MapView({ lat, lng, street }) {
   const mapRef = useRef(null);
   const mapInstance = useRef(null);
   const markerRef = useRef(null);
+  const [L, setL] = useState(null);
 
-  // Two effects on purpose: the [] one tears down on unmount, the
-  // [lat,lng,street] one updates marker in place without destroying
-  // the map (smooth repositioning when the car location changes).
+  useEffect(() => {
+    if (lat != null) loadLeaflet().then(setL);
+  }, [lat]);
+
   useEffect(() => () => {
     if (mapInstance.current) { mapInstance.current.remove(); mapInstance.current = null; markerRef.current = null; }
   }, []);
 
   useEffect(() => {
-    if (!mapRef.current || lat == null) return;
+    if (!L || !mapRef.current || lat == null) return;
     if (!mapInstance.current) {
       mapInstance.current = L.map(mapRef.current).setView([lat, lng], 17);
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '\u00A9 OpenStreetMap' }).addTo(mapInstance.current);
@@ -96,7 +91,7 @@ function MapView({ lat, lng, street }) {
     popup.appendChild(document.createElement('br'));
     popup.appendChild(document.createTextNode(street || 'Unknown'));
     markerRef.current.bindPopup(popup).openPopup();
-  }, [lat, lng, street]);
+  }, [L, lat, lng, street]);
 
   if (lat == null) return null;
   return <div ref={mapRef} className="map-container" aria-label="Vehicle location map" role="img" />;
@@ -159,6 +154,7 @@ function TestSidePanel() {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [L, setL] = useState(null);
 
   // Abort the in-flight probe before starting a new one — fast drags
   // would otherwise race and the last-resolving call (not the latest
@@ -177,8 +173,10 @@ function TestSidePanel() {
     if (!ctrl.signal.aborted) setLoading(false);
   }, []);
 
+  useEffect(() => { loadLeaflet().then(setL); }, []);
+
   useEffect(() => {
-    if (!mapRef.current || mapInstance.current) return;
+    if (!L || !mapRef.current || mapInstance.current) return;
     const m = L.map(mapRef.current).setView([pos.lat, pos.lng], 18);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(m);
     const mk = L.marker([pos.lat, pos.lng], { draggable: true }).addTo(m);
@@ -194,11 +192,11 @@ function TestSidePanel() {
       m.remove();
       mapInstance.current = null;
     };
-  }, []);
+  }, [L]);
 
   // Draw the chosen road segment + perpendicular foot whenever result updates.
   useEffect(() => {
-    if (!mapInstance.current || !result?.segment) return;
+    if (!L || !mapInstance.current || !result?.segment) return;
     const map = mapInstance.current;
     if (map._segOverlay) map.removeLayer(map._segOverlay);
     if (map._footOverlay) map.removeLayer(map._footOverlay);
@@ -209,7 +207,7 @@ function TestSidePanel() {
     if (seg?.foot && pos) {
       map._footOverlay = L.polyline([[seg.foot.lat, seg.foot.lng], [pos.lat, pos.lng]], { color: '#f85149', weight: 2, dashArray: '4 4' }).addTo(map);
     }
-  }, [result, pos]);
+  }, [L, result, pos]);
 
   return (
     <div role="tabpanel">
