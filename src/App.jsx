@@ -280,22 +280,25 @@ function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis, notif
 
 export default function App() {
   const [tab, setTab] = useState(() => {
-    const q = new URLSearchParams(window.location.search);
-    const p = q.get('tab');
-    if (['address', 'app', 'test', 'manual'].includes(p)) return p;
-    return q.get('address') ? 'address' : 'app';
+    const p = new URLSearchParams(window.location.search).get('tab');
+    return p === 'manual' ? 'manual' : 'app';
   });
   // Persist active tab to URL — refresh/share preserves the view.
   // Drop ?tab=app since it's the default; keeps URLs clean.
-  // Also drop ?address= when leaving the address tab — the param
-  // belongs to that tab's flow only.
   useEffect(() => {
     const url = new URL(window.location);
     if (tab === 'app') url.searchParams.delete('tab');
     else url.searchParams.set('tab', tab);
-    url.searchParams.delete('address'); // legacy address-tab param — drop wherever it appears
     window.history.replaceState({}, '', url);
   }, [tab]);
+  // One-time strip of legacy ?address= (from the deleted Address tab).
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).has('address')) {
+      const url = new URL(window.location);
+      url.searchParams.delete('address');
+      window.history.replaceState({}, '', url);
+    }
+  }, []);
   // Clear results on tab switch — tabs share state and we don't want
   // app/manual results bleeding across. Also abort any in-flight
   // manual probe so on return its setLoading(false) doesn't leak,
@@ -718,10 +721,8 @@ export default function App() {
   }, []);
 
   const tabs = [
-    { id: 'address', icon: '\uD83D\uDCCD', label: 'Address' },
     { id: 'app', icon: '\uD83D\uDE97', label: 'Tesla Login' },
     { id: 'manual', icon: '\uD83D\uDDFA\uFE0F', label: 'Manual' },
-    { id: 'test', icon: '\uD83E\uDDEA', label: 'Test Side' },
   ];
 
   return (
