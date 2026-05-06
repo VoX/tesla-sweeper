@@ -6,13 +6,14 @@ let leafletPromise = null;
 export function loadLeaflet() {
   if (leafletPromise) return leafletPromise;
   leafletPromise = (async () => {
-    // Wait for page load before initializing leaflet — its L.map()
-    // call reads container dimensions, and any forced layout before
-    // window.onload trips Firefox's "Layout was forced before the
-    // page was fully loaded" warning.
+    // Wait for page load + one idle slot before initializing leaflet —
+    // L.map() reads container dimensions, and any forced layout before
+    // the browser is fully idle trips Firefox's "Layout was forced
+    // before the page was fully loaded" warning.
     if (document.readyState !== 'complete') {
       await new Promise(resolve => window.addEventListener('load', resolve, { once: true }));
     }
+    await new Promise(resolve => (window.requestIdleCallback || window.requestAnimationFrame)(resolve));
     const [Lmod, icon2x, icon, shadow] = await Promise.all([
       import('leaflet'),
       import('leaflet/dist/images/marker-icon-2x.png'),
