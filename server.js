@@ -867,6 +867,14 @@ async function runNotifications({ mode = 'daily' } = {}) {
         out.car_side = sweep.car_side || null;
         out.sweep_events = sweep.sweep_events || [];
         out.side_detection = sweep.side_detection || null;
+        // Canonicalize on the OSM-detected car-side house number — the
+        // reverse-geocode often returns the closest building (which can
+        // be on the opposite curb, especially for oversized lots) and
+        // we don't want the DM to name a house that isn't the user's.
+        const carHouseNum = sweep.side_detection?.car_house_number;
+        if (carHouseNum && geo.street) {
+          out.address = geo.city ? `${carHouseNum} ${geo.street}, ${geo.city}` : `${carHouseNum} ${geo.street}`;
+        }
         out.ok = true;
       } catch (e) {
         out.ok = false;
