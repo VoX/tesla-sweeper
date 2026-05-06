@@ -64,8 +64,7 @@ function MapView({ lat, lng, street, segment, draggable, onPinMove, popupLabel =
   const mapRef = useRef(null);
   const mapInstance = useRef(null);
   const markerRef = useRef(null);
-  const segOverlayRef = useRef(null);
-  const footOverlayRef = useRef(null);
+  const overlaysRef = useRef([]);
   const onPinMoveRef = useRef(onPinMove);
   const [L, setL] = useState(null);
 
@@ -78,7 +77,7 @@ function MapView({ lat, lng, street, segment, draggable, onPinMove, popupLabel =
   }, [lat]);
 
   useEffect(() => () => {
-    if (mapInstance.current) { mapInstance.current.remove(); mapInstance.current = null; markerRef.current = null; segOverlayRef.current = null; footOverlayRef.current = null; }
+    if (mapInstance.current) { mapInstance.current.remove(); mapInstance.current = null; markerRef.current = null; overlaysRef.current = []; }
   }, []);
 
   useEffect(() => {
@@ -111,12 +110,12 @@ function MapView({ lat, lng, street, segment, draggable, onPinMove, popupLabel =
   useEffect(() => {
     if (!L || !mapInstance.current) return;
     const map = mapInstance.current;
-    if (segOverlayRef.current) { map.removeLayer(segOverlayRef.current); segOverlayRef.current = null; }
-    if (footOverlayRef.current) { map.removeLayer(footOverlayRef.current); footOverlayRef.current = null; }
+    overlaysRef.current.forEach(layer => map.removeLayer(layer));
+    overlaysRef.current = [];
     if (!segment?.A || !segment?.B) return;
-    segOverlayRef.current = L.polyline([[segment.A.lat, segment.A.lng], [segment.B.lat, segment.B.lng]], { color: '#3fb950', weight: 4, opacity: 0.7 }).addTo(map);
-    if (segment.foot && lat != null) {
-      footOverlayRef.current = L.polyline([[segment.foot.lat, segment.foot.lng], [lat, lng]], { color: '#f85149', weight: 2, dashArray: '4 4' }).addTo(map);
+    overlaysRef.current.push(L.polyline([[segment.A.lat, segment.A.lng], [segment.B.lat, segment.B.lng]], { color: '#3fb950', weight: 4, opacity: 0.7 }).addTo(map));
+    if (segment.foot && lat != null && lng != null) {
+      overlaysRef.current.push(L.polyline([[segment.foot.lat, segment.foot.lng], [lat, lng]], { color: '#f85149', weight: 2, dashArray: '4 4' }).addTo(map));
     }
   }, [L, segment, lat, lng]);
 
@@ -136,11 +135,38 @@ function SideDetectionCard({ detection }) {
       {detection.side === 'unknown' && detection.error && <Row label="Reason" value={detection.error} />}
       <Row label="Road" value={detection.road_name || '\u2014'} />
       <Row label="Offset from centerline" value={detection.perpendicular_offset_m != null ? `${detection.perpendicular_offset_m} m` : '\u2014'} />
-      <Row label="Cross sign" value={String(detection.cross_sign)} />
+      <Row label="Cross sign" value={detection.cross_sign != null ? String(detection.cross_sign) : '—'} />
       <Row label="Car-side house #" value={detection.car_house_number ?? '\u2014'} />
       <Row label="Opposite-side house #" value={detection.opposite_house_number ?? '\u2014'} />
       <Row label="OSM way id" value={detection.way_id ?? '\u2014'} />
     </div>
+  );
+}
+
+// Shared results view used by Tesla Login + Manual tabs. The two tabs
+// differ only in how `pos` is sourced (Tesla API vs. drag) and whether
+// the marker is interactive \u2014 everything below is identical.
+function LocationResultsView({ pos, draggable, onPinMove, data, vehicleInfo, popupLabel }) {
+  return (
+    <>
+      <MapView
+        lat={pos?.lat}
+        lng={pos?.lng}
+        street={pos?.street || data?.place_name}
+        segment={data?.side_detection?.segment}
+        draggable={draggable}
+        onPinMove={onPinMove}
+        popupLabel={popupLabel}
+      />
+      <SweepResults
+        data={data}
+        vehicleName={vehicleInfo?.name}
+        fullAddr={vehicleInfo?.addr}
+        lat={pos?.lat}
+        lng={pos?.lng}
+      />
+      <SideDetectionCard detection={data?.side_detection} />
+    </>
   );
 }
 
@@ -809,6 +835,7 @@ export default function App() {
           <label htmlFor="address">Street Address in Somerville</label>
           <input id="address" placeholder="e.g. 11 Harvard St" value={address} onInput={e => setAddress(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleCheckAddress()} autoComplete="street-address" autoCapitalize="words" enterKeyHint="search" />
           <button onClick={handleCheckAddress} disabled={loading}>{loading ? 'Checking...' : 'Check Sweeping Schedule'}</button>
+          <LocationResultsView pos={mapPos} data={sweepData} />
         </div>
       )}
 
@@ -845,6 +872,7 @@ export default function App() {
                 />
               )}
               <button className="disconnect-btn" onClick={logout}>Disconnect</button>
+              <LocationResultsView pos={mapPos} data={sweepData} vehicleInfo={vehicleInfo} />
             </>
           ) : (
             <>
@@ -864,10 +892,6 @@ export default function App() {
           <button className="error-dismiss" onClick={() => setError('')} aria-label="Dismiss error">&times;</button>
         </div>
       )}
-      {(tab === 'address' || tab === 'app') && <>
-        <MapView lat={mapPos?.lat} lng={mapPos?.lng} street={mapPos?.street} />
-        <SweepResults data={sweepData} vehicleName={vehicleInfo?.name} fullAddr={vehicleInfo?.addr} lat={mapPos?.lat} lng={mapPos?.lng} />
-      </>}
 
       <footer>
         Somerville sweeping: Apr 1 – Dec 31 &middot; Data from Recollect/City of Somerville &middot; Always check street signs
