@@ -824,13 +824,26 @@ async function runNotifications() {
       out.consecutive_failures = nextFailures;
       out.prev_failures = prevFailures;
       out.last_dm_error_at = sub.last_dm_error_at || null;
+      out.last_dm_date = sub.last_dm_date || null;
       results.push(out);
     }
+    // Persist last_dm_date (ET YYYY-MM-DD) per sub right after a
+    // successful sweep DM so a service restart between the cron
+    // dispatch and `last_run_at` write can't re-DM the same user.
+    // The in-memory single-flight only protects same-process runs;
+    // maybeRecoverMissedRun on boot would otherwise re-fire the
+    // entire notify loop.
+    const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
     for (const out of results) {
       if (!shouldNotifySweep(out)) continue;
+      if (out.last_dm_date === todayET) {
+        out.dm_skipped = 'already-sent-today';
+        continue;
+      }
       const dm = await postSlackDM(out.slack_user_id, formatSweepDM(out));
       out.dm_sent = dm.ok;
       out.dm_error = dm.error || null;
+      if (dm.ok) patchSub(out.sub_id, { last_dm_date: todayET });
     }
     // Stuck-sub notice: DM the user once after the failure count
     // crosses the threshold, then once per day if it stays stuck.
@@ -909,10 +922,11 @@ function startNotificationCron() {
     try {
       const r = await runNotifications();
       const dmsOk = r.results.filter(o => o.dm_sent).length;
+      const dmsSkip = r.results.filter(o => o.dm_skipped).length;
       const errs = r.results.filter(o => !o.ok);
       const dmFails = r.results.filter(o => o.dm_sent === false && shouldNotifySweep(o));
       const stuckDms = r.results.filter(o => o.error_dm_sent).length;
-      console.log(`[cron] ran ${r.results.length} sub(s), sent ${dmsOk} DM(s), ${stuckDms} stuck-sub DM(s), ${errs.length} sub error(s), ${dmFails.length} DM failure(s)`);
+      console.log(`[cron] ran ${r.results.length} sub(s), sent ${dmsOk} DM(s), skipped ${dmsSkip} (already-sent-today), ${stuckDms} stuck-sub DM(s), ${errs.length} sub error(s), ${dmFails.length} DM failure(s)`);
       for (const o of errs) console.warn(`[cron] sub ${o.sub_id} (${o.vehicle_name}) error: ${o.error} (consecutive_failures=${o.consecutive_failures})`);
       for (const o of dmFails) console.warn(`[cron] sub ${o.sub_id} (${o.vehicle_name}) DM failed: ${o.dm_error}`);
     } catch (e) { console.error('[cron] runNotifications failed:', e); }
