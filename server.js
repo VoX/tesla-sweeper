@@ -273,7 +273,7 @@ async function runSweepCheck({ address, today_date, past_noon = false, lat, lng 
   }
 
   const houseMatch = address.trim().match(/^(\d+)/);
-  const houseNum = houseMatch ? parseInt(houseMatch[1]) : null;
+  const parsedHouseNum = houseMatch ? parseInt(houseMatch[1]) : null;
 
   // OSM-based geometric detection beats houseNum%2 when a car parks
   // across from its own address. Fall back to parity if OSM lacks
@@ -290,13 +290,19 @@ async function runSweepCheck({ address, today_date, past_noon = false, lat, lng 
   } catch (e) {
     console.warn('[sweep-check] whichSide threw:', e.message);
   }
-  if (!carSide && houseNum) {
-    carSide = houseNum % 2 === 0 ? 'even' : 'odd';
+  if (!carSide && parsedHouseNum) {
+    carSide = parsedHouseNum % 2 === 0 ? 'even' : 'odd';
     sideSource = 'house_parity';
     // [fallback] in journalctl = OSM no-data path engaged; grep this
     // to gauge how often the parity heuristic is carrying the result.
-    console.warn(`[sweep-check] [fallback] OSM no-data, using parity for #${houseNum} → ${carSide}`);
+    console.warn(`[sweep-check] [fallback] OSM no-data, using parity for #${parsedHouseNum} → ${carSide}`);
   }
+  // Canonical house number for display: prefer the OSM-detected
+  // car-side number (the actual house on the car's curb); fall back
+  // to the address-parsed one when OSM has no data. Used by both the
+  // server-side message templates and the SPA's Details card so they
+  // never disagree.
+  const houseNum = sideDetection?.car_house_number ?? parsedHouseNum;
 
   const sweepingToday = sweepEvents.filter(e => e.date === todayStr);
   const sweepingTomorrow = sweepEvents.filter(e => e.date === tomorrowStr);
