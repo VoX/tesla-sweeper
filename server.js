@@ -52,7 +52,11 @@ function verifySession(token, slackUserId) {
   const expNum = parseInt(exp, 10);
   if (!Number.isFinite(expNum) || expNum < Date.now()) return false;
   const expected = createHmac('sha256', SESSION_HMAC_KEY).update(`${user}.${exp}`).digest('base64url');
-  const a = Buffer.from(mac), b = Buffer.from(expected);
+  // Decode both base64url MACs to their 32-byte form before comparing.
+  // utf8 string compare also works (deterministic encoding) but the
+  // decoded form is canonical and ~25% fewer bytes through the timing
+  // primitive.
+  const a = Buffer.from(mac, 'base64url'), b = Buffer.from(expected, 'base64url');
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
 }
@@ -93,6 +97,8 @@ const TESLA_TOKEN_URL = 'https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/tok
 const SUBS_DIR = join(__dirname, 'data');
 const SUBS_FILE = join(SUBS_DIR, 'subscriptions.json');
 const NOTIFICATIONS_RUN_TOKEN = process.env.NOTIFICATIONS_RUN_TOKEN || '';
+const STUCK_FAIL_THRESHOLD = 3;
+const STUCK_DM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 mkdirSync(SUBS_DIR, { recursive: true, mode: 0o700 });
 function loadStore() {
   let raw;
@@ -813,16 +819,12 @@ async function runNotifications() {
       }
       // Track consecutive_failures so we can DM the user once their
       // sub stops working (Tesla token revoked, vehicle removed, etc).
-      // Reset on success.
-      const prevFailures = sub.consecutive_failures || 0;
-      const nextFailures = out.ok ? 0 : prevFailures + 1;
+      out.consecutive_failures = out.ok ? 0 : (sub.consecutive_failures || 0) + 1;
       patchSub(sub.id, {
         last_check_at: new Date().toISOString(),
         last_result: { ok: out.ok, days_until_next: out.days_until_next, error: out.error },
-        consecutive_failures: nextFailures,
+        consecutive_failures: out.consecutive_failures,
       });
-      out.consecutive_failures = nextFailures;
-      out.prev_failures = prevFailures;
       out.last_dm_error_at = sub.last_dm_error_at || null;
       out.last_dm_date = sub.last_dm_date || null;
       results.push(out);
@@ -845,15 +847,11 @@ async function runNotifications() {
       out.dm_error = dm.error || null;
       if (dm.ok) patchSub(out.sub_id, { last_dm_date: todayET });
     }
-    // Stuck-sub notice: DM the user once after the failure count
-    // crosses the threshold, then once per day if it stays stuck.
-    // Avoids spamming a user whose token is permanently dead — they
-    // only hear about it once until they re-enable.
-    const STUCK_FAIL_THRESHOLD = 3;
-    const STUCK_DM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+    // Stuck-sub notice: DM once the failure count crosses the threshold,
+    // then once per day while it stays stuck. Avoids spamming a user
+    // whose token is permanently dead.
     for (const out of results) {
-      if (out.ok) continue;
-      if (out.consecutive_failures < STUCK_FAIL_THRESHOLD) continue;
+      if (out.ok || out.consecutive_failures < STUCK_FAIL_THRESHOLD) continue;
       const lastErrTs = out.last_dm_error_at ? Date.parse(out.last_dm_error_at) : 0;
       if (Date.now() - lastErrTs < STUCK_DM_COOLDOWN_MS) continue;
       const dm = await postSlackDM(out.slack_user_id,
@@ -921,13 +919,13 @@ function startNotificationCron() {
     console.log('[cron] firing daily notification run');
     try {
       const r = await runNotifications();
-      const dmsOk = r.results.filter(o => o.dm_sent).length;
-      const dmsSkip = r.results.filter(o => o.dm_skipped).length;
       const errs = r.results.filter(o => !o.ok);
       const dmFails = r.results.filter(o => o.dm_sent === false && shouldNotifySweep(o));
-      const stuckDms = r.results.filter(o => o.error_dm_sent).length;
-      console.log(`[cron] ran ${r.results.length} sub(s), sent ${dmsOk} DM(s), skipped ${dmsSkip} (already-sent-today), ${stuckDms} stuck-sub DM(s), ${errs.length} sub error(s), ${dmFails.length} DM failure(s)`);
-      for (const o of errs) console.warn(`[cron] sub ${o.sub_id} (${o.vehicle_name}) error: ${o.error} (consecutive_failures=${o.consecutive_failures})`);
+      const dmsOk = r.results.filter(o => o.dm_sent).length;
+      const dmsDup = r.results.filter(o => o.dm_skipped).length;
+      const dmsStuck = r.results.filter(o => o.error_dm_sent).length;
+      console.log(`[cron] subs=${r.results.length} dm_sent=${dmsOk} dm_dup=${dmsDup} dm_stuck=${dmsStuck} errs=${errs.length} dm_fails=${dmFails.length}`);
+      for (const o of errs) console.warn(`[cron] sub ${o.sub_id} (${o.vehicle_name}) error: ${o.error} (fails=${o.consecutive_failures})`);
       for (const o of dmFails) console.warn(`[cron] sub ${o.sub_id} (${o.vehicle_name}) DM failed: ${o.dm_error}`);
     } catch (e) { console.error('[cron] runNotifications failed:', e); }
   }, { timezone: 'America/New_York' });
