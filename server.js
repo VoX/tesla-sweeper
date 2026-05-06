@@ -229,12 +229,13 @@ async function runSweepCheck({ address, today_date, past_noon = false, lat, lng 
   // building data on the street or the lookup throws.
   let carSide = null;
   let sideSource = null;
+  let sideDetection = null;
   const haveCoords = typeof lat === 'number' && typeof lng === 'number';
   if (haveCoords) {
     try {
-      const ws = await whichSide(lat, lng);
-      if (ws.side === 'odd' || ws.side === 'even') {
-        carSide = ws.side;
+      sideDetection = await whichSide(lat, lng);
+      if (sideDetection.side === 'odd' || sideDetection.side === 'even') {
+        carSide = sideDetection.side;
         sideSource = 'osm';
       }
     } catch (e) {
@@ -315,6 +316,7 @@ async function runSweepCheck({ address, today_date, past_noon = false, lat, lng 
     sweep_events: sweepEvents,
     car_side: carSide,
     side_source: sideSource,
+    side_detection: sideDetection,
     house_num: houseNum,
     days_until_next: daysUntilNext,
     latitude,
