@@ -60,18 +60,25 @@ function Row({ label, value }) {
   return <div className="row"><span className="label">{label}</span><span>{value}</span></div>;
 }
 
-function MapView({ lat, lng, street }) {
+function MapView({ lat, lng, street, segment, draggable, onPinMove, popupLabel = 'Your Car' }) {
   const mapRef = useRef(null);
   const mapInstance = useRef(null);
   const markerRef = useRef(null);
+  const segOverlayRef = useRef(null);
+  const footOverlayRef = useRef(null);
+  const onPinMoveRef = useRef(onPinMove);
   const [L, setL] = useState(null);
+
+  // Keep latest dragend handler in a ref so the marker's listener
+  // (attached once at map init) always calls the current closure.
+  useEffect(() => { onPinMoveRef.current = onPinMove; }, [onPinMove]);
 
   useEffect(() => {
     if (lat != null) loadLeaflet().then(setL);
   }, [lat]);
 
   useEffect(() => () => {
-    if (mapInstance.current) { mapInstance.current.remove(); mapInstance.current = null; markerRef.current = null; }
+    if (mapInstance.current) { mapInstance.current.remove(); mapInstance.current = null; markerRef.current = null; segOverlayRef.current = null; footOverlayRef.current = null; }
   }, []);
 
   useEffect(() => {
@@ -79,22 +86,62 @@ function MapView({ lat, lng, street }) {
     if (!mapInstance.current) {
       mapInstance.current = L.map(mapRef.current).setView([lat, lng], 17);
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '\u00A9 OpenStreetMap' }).addTo(mapInstance.current);
-      markerRef.current = L.marker([lat, lng]).addTo(mapInstance.current);
+      markerRef.current = L.marker([lat, lng], { draggable: !!draggable }).addTo(mapInstance.current);
+      if (draggable) {
+        markerRef.current.on('dragend', () => {
+          const ll = markerRef.current.getLatLng();
+          onPinMoveRef.current?.(ll.lat, ll.lng);
+        });
+      }
     } else {
       mapInstance.current.setView([lat, lng], 17);
       markerRef.current.setLatLng([lat, lng]);
     }
     const popup = document.createElement('div');
     const b = document.createElement('b');
-    b.textContent = 'Your Car';
+    b.textContent = popupLabel;
     popup.appendChild(b);
     popup.appendChild(document.createElement('br'));
     popup.appendChild(document.createTextNode(street || 'Unknown'));
-    markerRef.current.bindPopup(popup).openPopup();
-  }, [L, lat, lng, street]);
+    markerRef.current.bindPopup(popup);
+    if (!draggable) markerRef.current.openPopup();
+  }, [L, lat, lng, street, draggable, popupLabel]);
+
+  // Draw chosen road segment + perpendicular foot whenever segment changes.
+  useEffect(() => {
+    if (!L || !mapInstance.current) return;
+    const map = mapInstance.current;
+    if (segOverlayRef.current) { map.removeLayer(segOverlayRef.current); segOverlayRef.current = null; }
+    if (footOverlayRef.current) { map.removeLayer(footOverlayRef.current); footOverlayRef.current = null; }
+    if (!segment?.A || !segment?.B) return;
+    segOverlayRef.current = L.polyline([[segment.A.lat, segment.A.lng], [segment.B.lat, segment.B.lng]], { color: '#3fb950', weight: 4, opacity: 0.7 }).addTo(map);
+    if (segment.foot && lat != null) {
+      footOverlayRef.current = L.polyline([[segment.foot.lat, segment.foot.lng], [lat, lng]], { color: '#f85149', weight: 2, dashArray: '4 4' }).addTo(map);
+    }
+  }, [L, segment, lat, lng]);
 
   if (lat == null) return null;
-  return <div ref={mapRef} className="map-container" aria-label="Vehicle location map" role="img" />;
+  return <div ref={mapRef} className="map-container" aria-label="Location map" role="img" />;
+}
+
+// Diagnostic card for OSM-based side detection. Renders nothing when
+// detection is null (e.g. no coords were sent or whichSide threw).
+function SideDetectionCard({ detection }) {
+  if (!detection) return null;
+  const sideColor = detection.side === 'odd' ? '#d29922' : detection.side === 'even' ? '#3fb950' : '#8b949e';
+  return (
+    <div className="card">
+      <h3>Side detection</h3>
+      <Row label="Side" value={<strong style={{ color: sideColor }}>{detection.side?.toUpperCase() || 'UNKNOWN'}</strong>} />
+      {detection.side === 'unknown' && detection.error && <Row label="Reason" value={detection.error} />}
+      <Row label="Road" value={detection.road_name || '\u2014'} />
+      <Row label="Offset from centerline" value={detection.perpendicular_offset_m != null ? `${detection.perpendicular_offset_m} m` : '\u2014'} />
+      <Row label="Cross sign" value={String(detection.cross_sign)} />
+      <Row label="Car-side house #" value={detection.car_house_number ?? '\u2014'} />
+      <Row label="Opposite-side house #" value={detection.opposite_house_number ?? '\u2014'} />
+      <Row label="OSM way id" value={detection.way_id ?? '\u2014'} />
+    </div>
+  );
 }
 
 function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
