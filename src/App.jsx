@@ -764,6 +764,7 @@ export default function App() {
               {vehicles && vehicles.length > 0 && (
                 <button onClick={() => handleCheckCar(selectedVehicle)} disabled={loading || (vehicles.length > 1 && !selectedVehicle)}>{loading ? (waking ? 'Waking your car... (up to 60s)' : 'Checking...') : 'Check My Car'}</button>
               )}
+              <LocationResultsView pos={mapPos} data={sweepData} vehicleInfo={vehicleInfo} popupLabel="Your Car" />
               {vehicles && vehicles.length > 0 && (
                 <NotificationsPanel
                   slackUserId={slackUserId}
@@ -777,7 +778,6 @@ export default function App() {
                 />
               )}
               <button className="disconnect-btn" onClick={logout}>Disconnect</button>
-              <LocationResultsView pos={mapPos} data={sweepData} vehicleInfo={vehicleInfo} popupLabel="Your Car" />
             </>
           ) : (
             <>
