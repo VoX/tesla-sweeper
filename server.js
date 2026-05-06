@@ -481,9 +481,8 @@ async function whichSide(lat, lng) {
   }
   const leftRep = nearestOf(leftBuildings);
   const rightRep = nearestOf(rightBuildings);
-  let carNum = null, oppositeNum = null;
-  if (cross > 0) { carNum = leftRep; oppositeNum = rightRep; }
-  else if (cross < 0) { carNum = rightRep; oppositeNum = leftRep; }
+  const carNum = cross > 0 ? leftRep : cross < 0 ? rightRep : null;
+  const oppositeNum = cross > 0 ? rightRep : cross < 0 ? leftRep : null;
 
   return {
     side,
@@ -816,6 +815,13 @@ app.post('/api/notifications/run', wrap(async (req, res) => {
   res.json(await runNotifications());
 }));
 
+// Liveness/ops probe — `last_run_at` answers "is the cron working"
+// in one curl. Cheap, no auth, no PII.
+app.get('/healthz', (req, res) => {
+  const store = loadStore();
+  res.json({ ok: true, last_run_at: store.last_run_at || null, sub_count: (store.subscriptions || []).length });
+});
+
 // API 404 catch — must be before the SPA catch-all
 app.all('/api/*', (req, res) => res.status(404).json({ detail: 'API endpoint not found' }));
 
@@ -835,8 +841,12 @@ function startNotificationCron() {
     console.log('[cron] firing daily notification run');
     try {
       const r = await runNotifications();
-      const dms = r.results.filter(o => o.dm_sent).length;
-      console.log(`[cron] ran ${r.results.length} sub(s), sent ${dms} DM(s)`);
+      const dmsOk = r.results.filter(o => o.dm_sent).length;
+      const errs = r.results.filter(o => !o.ok);
+      const dmFails = r.results.filter(o => o.dm_sent === false && shouldNotifySweep(o));
+      console.log(`[cron] ran ${r.results.length} sub(s), sent ${dmsOk} DM(s), ${errs.length} sub error(s), ${dmFails.length} DM failure(s)`);
+      for (const o of errs) console.warn(`[cron] sub ${o.sub_id} (${o.vehicle_name}) error: ${o.error}`);
+      for (const o of dmFails) console.warn(`[cron] sub ${o.sub_id} (${o.vehicle_name}) DM failed: ${o.dm_error}`);
     } catch (e) { console.error('[cron] runNotifications failed:', e); }
   }, { timezone: 'America/New_York' });
 }

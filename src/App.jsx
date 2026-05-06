@@ -53,8 +53,10 @@ async function get(url) { return handleRes(await fetch(`${API}/${url}`)); }
 
 function StatusBox({ status, title, message }) {
   const icon = { danger: '\u{1F6A8}', warning: '\u26A0\uFE0F', safe: '\u2705', info: '\u2139\uFE0F' }[status] || '';
+  // Danger gets role=alert + assertive live region so screen readers
+  // interrupt; the rest get polite status updates.
   return (
-    <div className={`status-box ${status}`}>
+    <div className={`status-box ${status}`} role={status === 'danger' ? 'alert' : 'status'} aria-live={status === 'danger' ? 'assertive' : 'polite'}>
       <h2>{icon} {title}</h2>
       <p>{message}</p>
     </div>
@@ -306,9 +308,10 @@ function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis, notif
 
 export default function App() {
   const [tab, setTab] = useState(() => {
-    const p = new URLSearchParams(window.location.search).get('tab');
+    const q = new URLSearchParams(window.location.search);
+    const p = q.get('tab');
     if (['address', 'app', 'test'].includes(p)) return p;
-    return new URLSearchParams(window.location.search).get('address') ? 'address' : 'app';
+    return q.get('address') ? 'address' : 'app';
   });
   // Persist active tab to URL — refresh/share preserves the view.
   // Drop ?tab=app since it's the default; keeps URLs clean.
@@ -317,6 +320,14 @@ export default function App() {
     if (tab === 'app') url.searchParams.delete('tab');
     else url.searchParams.set('tab', tab);
     window.history.replaceState({}, '', url);
+  }, [tab]);
+  // Clear results on tab switch — address tab and app tab share the
+  // same sweepData/mapPos/vehicleInfo state, so without this the
+  // address result bleeds into the app tab and vice-versa.
+  useEffect(() => {
+    setSweepData(null);
+    setMapPos(null);
+    setVehicleInfo(null);
   }, [tab]);
   const [loading, setLoading] = useState(false);
   // Sub-message shown under the loading state. Used to surface
@@ -340,7 +351,6 @@ export default function App() {
   });
 
   const [address, setAddress] = useState(() => new URLSearchParams(window.location.search).get('address') || '');
-  const autoLookupDone = useRef(false);
 
   const [slackUserId, setSlackUserId] = useState(() => localStorage.getItem('tesla_slack_user_id') || '');
   const [subscriptions, setSubscriptions] = useState(null);
@@ -716,10 +726,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (autoLookupDone.current || !address) return;
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('address')) {
-      autoLookupDone.current = true;
+    if (address && new URLSearchParams(window.location.search).get('address')) {
       handleCheckAddress();
     }
   }, []);
@@ -752,7 +759,7 @@ export default function App() {
       {tab === 'address' && (
         <div role="tabpanel">
           <label htmlFor="address">Street Address in Somerville</label>
-          <input id="address" placeholder="e.g. 11 Harvard St" value={address} onInput={e => setAddress(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleCheckAddress()} />
+          <input id="address" placeholder="e.g. 11 Harvard St" value={address} onInput={e => setAddress(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleCheckAddress()} autoComplete="street-address" autoCapitalize="words" enterKeyHint="search" />
           <button onClick={handleCheckAddress} disabled={loading}>{loading ? 'Checking...' : 'Check Sweeping Schedule'}</button>
         </div>
       )}
@@ -804,9 +811,9 @@ export default function App() {
       {tab === 'test' && <TestSidePanel />}
 
       {error && (
-        <div className="error-box">
+        <div className="error-box" role="alert">
           <p className="error">{error}</p>
-          <button className="error-dismiss" onClick={() => setError('')}>&times;</button>
+          <button className="error-dismiss" onClick={() => setError('')} aria-label="Dismiss error">&times;</button>
         </div>
       )}
       {(tab === 'address' || tab === 'app') && <>
