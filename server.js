@@ -230,25 +230,21 @@ async function runSweepCheck({ address, today_date, past_noon = false, lat, lng 
   let carSide = null;
   let sideSource = null;
   let sideDetection = null;
-  const haveCoords = typeof lat === 'number' && typeof lng === 'number';
-  if (haveCoords) {
-    try {
-      sideDetection = await whichSide(lat, lng);
-      if (sideDetection.side === 'odd' || sideDetection.side === 'even') {
-        carSide = sideDetection.side;
-        sideSource = 'osm';
-      }
-    } catch (e) {
-      console.warn('[sweep-check] whichSide threw:', e.message);
+  try {
+    sideDetection = await whichSide(lat, lng);
+    if (sideDetection.side === 'odd' || sideDetection.side === 'even') {
+      carSide = sideDetection.side;
+      sideSource = 'osm';
     }
+  } catch (e) {
+    console.warn('[sweep-check] whichSide threw:', e.message);
   }
   if (!carSide && houseNum) {
     carSide = houseNum % 2 === 0 ? 'even' : 'odd';
     sideSource = 'house_parity';
-    // Visible signal in journalctl when OSM detection didn't yield a
-    // side despite having coords — operators can grep for [fallback]
-    // to gauge how often the heuristic is carrying the result.
-    if (haveCoords) console.warn(`[sweep-check] [fallback] OSM no-data, using parity for #${houseNum} → ${carSide}`);
+    // [fallback] in journalctl = OSM no-data path engaged; grep this
+    // to gauge how often the parity heuristic is carrying the result.
+    console.warn(`[sweep-check] [fallback] OSM no-data, using parity for #${houseNum} → ${carSide}`);
   }
 
   const sweepingToday = sweepEvents.filter(e => e.date === todayStr);
@@ -291,23 +287,6 @@ async function runSweepCheck({ address, today_date, past_noon = false, lat, lng 
     message = 'No sweeping events found in the next 30 days.';
   }
 
-  // Caller already supplied coords (cron, web-from-car-location) — echo
-  // them back. Otherwise forward-geocode for the map.
-  let latitude = haveCoords ? lat : null;
-  let longitude = haveCoords ? lng : null;
-  if (!haveCoords) {
-    try {
-      const geoRes = await nominatimFetch(
-        `${NOMINATIM_BASE}/search?${new URLSearchParams({ q: (place.name || address) + ', Somerville, MA', format: 'jsonv2', limit: 1 })}`,
-        { headers: { 'User-Agent': UA } }
-      );
-      if (geoRes.ok) {
-        const results = await geoRes.json();
-        if (results.length) { latitude = parseFloat(results[0].lat); longitude = parseFloat(results[0].lon); }
-      }
-    } catch {}
-  }
-
   return {
     found: true,
     place_name: place.name || address,
@@ -319,8 +298,8 @@ async function runSweepCheck({ address, today_date, past_noon = false, lat, lng 
     side_detection: sideDetection,
     house_num: houseNum,
     days_until_next: daysUntilNext,
-    latitude,
-    longitude,
+    latitude: lat,
+    longitude: lng,
   };
 }
 
@@ -541,6 +520,9 @@ app.post('/api/which-side', wrap(async (req, res) => {
 app.post('/api/sweep-check', wrap(async (req, res) => {
   const { address, today_date, past_noon, lat, lng } = req.body;
   if (!address) return res.status(400).json({ detail: 'Address required' });
+  if (typeof lat !== 'number' || typeof lng !== 'number') {
+    return res.status(400).json({ detail: 'lat and lng required as numbers' });
+  }
   res.json(await runSweepCheck({ address, today_date, past_noon, lat, lng }));
 }));
 

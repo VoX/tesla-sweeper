@@ -299,15 +299,6 @@ export default function App() {
       window.history.replaceState({}, '', url);
     }
   }, []);
-  // Abort any in-flight manual probe on tab switch so its result
-  // doesn't land into a tab you've left. The tabs use disjoint state
-  // (app: sweepData/mapPos/vehicleInfo, manual: manualSweepData/
-  // manualPos) so cross-tab cached results are fine to preserve —
-  // returning to a tab you already loaded just shows the prior view
-  // instead of forcing a re-check.
-  useEffect(() => {
-    manualInflightRef.current?.abort();
-  }, [tab]);
   const [loading, setLoading] = useState(false);
   // Sub-message shown under the loading state. Used to surface
   // "your car is asleep, waking it" after the first few seconds —
@@ -335,6 +326,16 @@ export default function App() {
   const [manualSweepData, setManualSweepData] = useState(null);
   const [manualLoading, setManualLoading] = useState(false);
   const manualInflightRef = useRef(null);
+
+  // Abort any in-flight manual probe on tab switch so its result
+  // doesn't land into a tab you've left. The tabs use disjoint state
+  // (app: sweepData/mapPos/vehicleInfo, manual: manualSweepData/
+  // manualPos) so cross-tab cached results are fine to preserve —
+  // returning to a tab you already loaded just shows the prior view
+  // instead of forcing a re-check.
+  useEffect(() => {
+    manualInflightRef.current?.abort();
+  }, [tab]);
 
   const [slackUserId, setSlackUserId] = useState(() => localStorage.getItem('tesla_slack_user_id') || '');
   const [subscriptions, setSubscriptions] = useState(null);
@@ -588,14 +589,14 @@ export default function App() {
     } catch (e) {
       if (e.name !== 'AbortError') setError(e.message);
     } finally {
-      // Always settle loading — even on abort. Otherwise a tab-switch
-      // mid-flight leaves manualLoading stuck true, and the initial-
-      // probe gate (!manualLoading) blocks re-entry on tab return.
+      // Always settle, even on abort, so the loading hint clears.
       setManualLoading(false);
     }
   }, []);
 
-  // Initial probe when Manual tab is opened with no data yet.
+  // Re-probe whenever Manual tab is shown without successful data —
+  // covers fresh page loads, returns from app tab after an abort,
+  // and any other path that left manualSweepData null.
   useEffect(() => {
     if (tab === 'manual' && !manualSweepData && !manualLoading) {
       handleManualPinMove(manualPos.lat, manualPos.lng);
@@ -654,7 +655,7 @@ export default function App() {
     const state = params.get('state');
     if (!code) return;
 
-    // Strip just the OAuth params, preserve user-meaningful ones (tab, address).
+    // Strip just the OAuth params (code/state); preserve ?tab=.
     const cleaned = new URL(window.location);
     cleaned.searchParams.delete('code');
     cleaned.searchParams.delete('state');
@@ -689,7 +690,6 @@ export default function App() {
 
     setOauthStatus('Exchanging code for token...');
     setLoading(true);
-    setTab('app');
 
     post('oauth/app/callback', { code })
       .then(async (data) => {
