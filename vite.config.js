@@ -1,6 +1,8 @@
 import { defineConfig } from 'vite';
 import preact from '@preact/preset-vite';
 import { brotliCompressSync, constants } from 'zlib';
+import { readdirSync, readFileSync, writeFileSync } from 'fs';
+import { join } from 'path';
 
 // Vite injects <script type="module"> before <link rel="stylesheet">,
 // which triggers Firefox's "Layout was forced before stylesheets
@@ -16,24 +18,33 @@ const cssBeforeScript = {
   },
 };
 
-// Pre-compress text assets at build time to .br. Express serves the
-// .br when Accept-Encoding includes br; older clients fall through to
-// Caddy's on-the-fly gzip. Brotli quality 11 is the slowest/smallest
-// preset — fine since this only runs at build.
+// Pre-compress text assets at build time to .br. Runs in closeBundle
+// (after vite has written final files including resolved __VITE_PRELOAD__
+// helpers) and reads from disk — generateBundle saw the un-resolved
+// preload tokens and produced broken .br files. Express serves the .br
+// when Accept-Encoding includes br; older clients fall through to
+// Caddy's on-the-fly gzip.
 const brotliPrecompress = {
   name: 'brotli-precompress',
   apply: 'build',
-  generateBundle(_, bundle) {
-    for (const [name, file] of Object.entries(bundle)) {
-      if (!/\.(js|css|html|svg)$/i.test(name)) continue;
-      const src = file.type === 'asset' ? file.source : file.code;
-      const buf = typeof src === 'string' ? Buffer.from(src) : Buffer.from(src);
-      if (buf.length < 1024) continue; // tiny files don't compress well
-      const br = brotliCompressSync(buf, {
+  enforce: 'post',
+  closeBundle() {
+    const distDir = join(process.cwd(), 'dist');
+    const compress = (path) => {
+      const buf = readFileSync(path);
+      if (buf.length < 1024) return;
+      writeFileSync(path + '.br', brotliCompressSync(buf, {
         params: { [constants.BROTLI_PARAM_QUALITY]: 11, [constants.BROTLI_PARAM_SIZE_HINT]: buf.length },
-      });
-      this.emitFile({ type: 'asset', fileName: name + '.br', source: br });
-    }
+      }));
+    };
+    const walk = (dir) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (/\.(js|css|html|svg)$/i.test(e.name)) compress(p);
+      }
+    };
+    walk(distDir);
   },
 };
 
