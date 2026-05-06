@@ -299,15 +299,13 @@ export default function App() {
       window.history.replaceState({}, '', url);
     }
   }, []);
-  // Clear results on tab switch — tabs share state and we don't want
-  // app/manual results bleeding across. Also abort any in-flight
-  // manual probe so on return its setLoading(false) doesn't leak,
-  // and clear manualSweepData so the initial-probe effect re-fires.
+  // Abort any in-flight manual probe on tab switch so its result
+  // doesn't land into a tab you've left. The tabs use disjoint state
+  // (app: sweepData/mapPos/vehicleInfo, manual: manualSweepData/
+  // manualPos) so cross-tab cached results are fine to preserve —
+  // returning to a tab you already loaded just shows the prior view
+  // instead of forcing a re-check.
   useEffect(() => {
-    setSweepData(null);
-    setMapPos(null);
-    setVehicleInfo(null);
-    setManualSweepData(null);
     manualInflightRef.current?.abort();
   }, [tab]);
   const [loading, setLoading] = useState(false);
@@ -590,7 +588,10 @@ export default function App() {
     } catch (e) {
       if (e.name !== 'AbortError') setError(e.message);
     } finally {
-      if (!ctrl.signal.aborted) setManualLoading(false);
+      // Always settle loading — even on abort. Otherwise a tab-switch
+      // mid-flight leaves manualLoading stuck true, and the initial-
+      // probe gate (!manualLoading) blocks re-entry on tab return.
+      setManualLoading(false);
     }
   }, []);
 
