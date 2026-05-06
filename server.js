@@ -683,29 +683,38 @@ app.post('/api/notifications/enable', wrap(async (req, res) => {
   if (!SLACK_USER_ID_RE.test(slack_user_id)) {
     return res.status(400).json({ detail: 'slack_user_id should look like U060NLFUM' });
   }
-  // Validate the refresh_token by doing one round-trip. Catches typos
-  // and revoked tokens before we persist garbage.
-  let rotated;
-  try {
-    rotated = await teslaTokenExchange({ grant_type: 'refresh_token', client_id: TESLA_APP_CLIENT_ID, refresh_token });
-  } catch (e) {
-    return res.status(400).json({ detail: 'Refresh token invalid: ' + e.message });
-  }
-  // Confirm the supplied vehicle_id is reachable with this token —
-  // otherwise the cron 404s daily forever.
-  try {
-    const vr = await fetchWithTimeout(`${TESLA_BASE}/api/1/vehicles`, {
-      headers: { Authorization: `Bearer ${rotated.access_token}`, 'Content-Type': 'application/json' },
-    });
-    const list = vr.ok ? ((await vr.json()).response || []) : [];
-    // Tesla vehicle IDs are 16-digit ints above MAX_SAFE_INTEGER, so
-    // JSON round-tripping can lose precision and === will silently
-    // miss. Compare as strings.
-    if (!list.some(v => String(v.id) === String(vehicle_id))) {
-      return res.status(400).json({ detail: 'vehicle_id not on this Tesla account' });
+  // Stub bypass: skip Tesla refresh + vehicle-id lookup. The cron
+  // path branches on STUB_REFRESH_TOKEN to short-circuit too.
+  const stub = isStubVehicle(vehicle_id);
+  let storedRefreshToken;
+  if (stub) {
+    storedRefreshToken = STUB_REFRESH_TOKEN;
+  } else {
+    // Validate the refresh_token by doing one round-trip. Catches typos
+    // and revoked tokens before we persist garbage.
+    let rotated;
+    try {
+      rotated = await teslaTokenExchange({ grant_type: 'refresh_token', client_id: TESLA_APP_CLIENT_ID, refresh_token });
+    } catch (e) {
+      return res.status(400).json({ detail: 'Refresh token invalid: ' + e.message });
     }
-  } catch (e) {
-    return res.status(502).json({ detail: 'Tesla vehicles lookup failed: ' + e.message });
+    // Confirm the supplied vehicle_id is reachable with this token —
+    // otherwise the cron 404s daily forever.
+    try {
+      const vr = await fetchWithTimeout(`${TESLA_BASE}/api/1/vehicles`, {
+        headers: { Authorization: `Bearer ${rotated.access_token}`, 'Content-Type': 'application/json' },
+      });
+      const list = vr.ok ? ((await vr.json()).response || []) : [];
+      // Tesla vehicle IDs are 16-digit ints above MAX_SAFE_INTEGER, so
+      // JSON round-tripping can lose precision and === will silently
+      // miss. Compare as strings.
+      if (!list.some(v => String(v.id) === String(vehicle_id))) {
+        return res.status(400).json({ detail: 'vehicle_id not on this Tesla account' });
+      }
+    } catch (e) {
+      return res.status(502).json({ detail: 'Tesla vehicles lookup failed: ' + e.message });
+    }
+    storedRefreshToken = rotated.refresh_token || refresh_token;
   }
   const subs = loadSubs();
   // One subscription per (slack_user_id, vehicle_id) — re-enable replaces.
@@ -715,7 +724,7 @@ app.post('/api/notifications/enable', wrap(async (req, res) => {
     slack_user_id,
     vehicle_id,
     vehicle_name: vehicle_name || 'Unknown',
-    refresh_token: rotated.refresh_token || refresh_token,
+    refresh_token: storedRefreshToken,
     created_at: new Date().toISOString(),
     last_check_at: null,
   };
