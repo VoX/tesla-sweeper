@@ -215,105 +215,6 @@ function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
   );
 }
 
-// Side-detection test panel. Draggable marker on a Leaflet map; on drop,
-// hits POST /api/which-side and renders the algorithm's reasoning so we
-// can validate the geometry against ground truth (e.g. drag pin to
-// either curb of Harvard St, confirm the side flips).
-function TestSidePanel() {
-  const mapRef = useRef(null);
-  const mapInstance = useRef(null);
-  const inflightRef = useRef(null);
-  const [pos, setPos] = useState({ lat: 42.385081, lng: -71.107841 });
-  const [result, setResult] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [L, setL] = useState(null);
-
-  // Abort the in-flight probe before starting a new one — fast drags
-  // would otherwise race and the last-resolving call (not the latest
-  // pin position) wins, leaving the green segment overlay misaligned.
-  const probe = useCallback(async (lat, lng) => {
-    inflightRef.current?.abort();
-    const ctrl = new AbortController();
-    inflightRef.current = ctrl;
-    setLoading(true); setError('');
-    try {
-      const r = await post('which-side', { lat, lng }, ctrl.signal);
-      if (!ctrl.signal.aborted) setResult(r);
-    } catch (e) {
-      if (e.name !== 'AbortError') { setError(e.message); setResult(null); }
-    }
-    if (!ctrl.signal.aborted) setLoading(false);
-  }, []);
-
-  useEffect(() => { loadLeaflet().then(setL); }, []);
-
-  useEffect(() => {
-    if (!L || !mapRef.current || mapInstance.current) return;
-    const m = L.map(mapRef.current).setView([pos.lat, pos.lng], 18);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(m);
-    const mk = L.marker([pos.lat, pos.lng], { draggable: true }).addTo(m);
-    mk.on('dragend', () => {
-      const ll = mk.getLatLng();
-      setPos({ lat: ll.lat, lng: ll.lng });
-      probe(ll.lat, ll.lng);
-    });
-    mapInstance.current = m;
-    probe(pos.lat, pos.lng);
-    return () => {
-      inflightRef.current?.abort();
-      m.remove();
-      mapInstance.current = null;
-    };
-  }, [L]);
-
-  // Draw the chosen road segment + perpendicular foot whenever result updates.
-  useEffect(() => {
-    if (!L || !mapInstance.current || !result?.segment) return;
-    const map = mapInstance.current;
-    if (map._segOverlay) map.removeLayer(map._segOverlay);
-    if (map._footOverlay) map.removeLayer(map._footOverlay);
-    const seg = result.segment;
-    if (seg?.A && seg?.B) {
-      map._segOverlay = L.polyline([[seg.A.lat, seg.A.lng], [seg.B.lat, seg.B.lng]], { color: '#3fb950', weight: 4, opacity: 0.7 }).addTo(map);
-    }
-    if (seg?.foot && pos) {
-      map._footOverlay = L.polyline([[seg.foot.lat, seg.foot.lng], [pos.lat, pos.lng]], { color: '#f85149', weight: 2, dashArray: '4 4' }).addTo(map);
-    }
-  }, [L, result, pos]);
-
-  return (
-    <div role="tabpanel">
-      <p style={{ fontSize: '0.85rem', color: '#8b949e', marginBottom: 12 }}>
-        Drag the pin to test side-detection. Green line = OSM road segment the algorithm picked.
-        Red dashed line = perpendicular from pin to that segment.
-      </p>
-      <div ref={mapRef} className="map-container" style={{ height: 360 }} />
-      <div className="card" style={{ marginTop: 12 }}>
-        <h3>Detection Result {loading && <span style={{ fontSize: '0.7rem', color: '#8b949e' }}>(probing...)</span>}</h3>
-        {error && <p style={{ color: '#f85149' }}>{error}</p>}
-        {result && (
-          <>
-            <Row label="Side" value={
-              <strong style={{ color: result.side === 'odd' ? '#d29922' : result.side === 'even' ? '#3fb950' : '#8b949e' }}>
-                {result.side?.toUpperCase() || 'UNKNOWN'}
-              </strong>
-            } />
-            {result.side === 'unknown' && result.error && <Row label="Reason" value={result.error} />}
-            <Row label="Road" value={result.road_name} />
-            <Row label="Offset from centerline" value={result.perpendicular_offset_m != null ? `${result.perpendicular_offset_m} m` : '—'} />
-            <Row label="Cross sign" value={String(result.cross_sign)} />
-            <Row label="Car-side house #" value={result.car_house_number ?? '—'} />
-            <Row label="Opposite-side house #" value={result.opposite_house_number ?? '—'} />
-            <Row label="Pin lat/lng" value={`${pos.lat.toFixed(6)}, ${pos.lng.toFixed(6)}`} />
-            <Row label="OSM way id" value={result.way_id ?? '—'} />
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // sv-SE locale formats dates as YYYY-MM-DD natively in evergreen browsers.
 function clientToday() { return new Date().toLocaleDateString('sv-SE'); }
 
@@ -392,16 +293,19 @@ export default function App() {
     const url = new URL(window.location);
     if (tab === 'app') url.searchParams.delete('tab');
     else url.searchParams.set('tab', tab);
-    if (tab !== 'address') url.searchParams.delete('address');
+    url.searchParams.delete('address'); // legacy address-tab param — drop wherever it appears
     window.history.replaceState({}, '', url);
   }, [tab]);
   // Clear results on tab switch — tabs share state and we don't want
-  // address/app/manual results bleeding across.
+  // app/manual results bleeding across. Also abort any in-flight
+  // manual probe so on return its setLoading(false) doesn't leak,
+  // and clear manualSweepData so the initial-probe effect re-fires.
   useEffect(() => {
     setSweepData(null);
     setMapPos(null);
     setVehicleInfo(null);
     setManualSweepData(null);
+    manualInflightRef.current?.abort();
   }, [tab]);
   const [loading, setLoading] = useState(false);
   // Sub-message shown under the loading state. Used to surface
@@ -423,8 +327,6 @@ export default function App() {
       return saved ? JSON.parse(saved) : null;
     } catch { return null; }
   });
-
-  const [address, setAddress] = useState(() => new URLSearchParams(window.location.search).get('address') || '');
 
   // Manual tab state — drag-to-set location, sweep + side detection
   // re-fetched on each pin move. Default centered on Somerville.
@@ -665,29 +567,6 @@ export default function App() {
     }
   };
 
-  const handleCheckAddress = async () => {
-    if (!address.trim()) { setError('Please enter an address'); return; }
-    if (loading) return;
-    reset();
-    setLoading(true);
-    try {
-      const data = await post('sweep-check', { address: address.trim(), today_date: clientToday(), past_noon: new Date().getHours() >= 12 });
-      if (!data.found) { setError(data.message); return; }
-      setSweepData(data);
-      if (data.latitude && data.longitude) {
-        setMapPos({ lat: data.latitude, lng: data.longitude, street: data.place_name });
-      } else {
-        // No coords from server — clear any stale map from a prior
-        // successful query so the user doesn't see a wrong-address pin.
-        setMapPos(null);
-      }
-      const url = new URL(window.location);
-      url.searchParams.set('address', address.trim());
-      window.history.replaceState({}, '', url);
-    } catch (e) { setError(e.message); }
-    finally { setLoading(false); }
-  };
-
   // Manual-tab pin handler. Reverse-geocodes to get a street name for
   // the Recollect lookup, then calls /api/sweep-check with coords —
   // sweep result + side_detection come back in one round trip.
@@ -838,12 +717,6 @@ export default function App() {
       });
   }, []);
 
-  useEffect(() => {
-    if (address && new URLSearchParams(window.location.search).get('address')) {
-      handleCheckAddress();
-    }
-  }, []);
-
   const tabs = [
     { id: 'address', icon: '\uD83D\uDCCD', label: 'Address' },
     { id: 'app', icon: '\uD83D\uDE97', label: 'Tesla Login' },
@@ -869,15 +742,6 @@ export default function App() {
           </button>
         ))}
       </div>
-
-      {tab === 'address' && (
-        <div role="tabpanel">
-          <label htmlFor="address">Street Address in Somerville</label>
-          <input id="address" placeholder="e.g. 11 Harvard St" value={address} onInput={e => setAddress(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleCheckAddress()} autoComplete="street-address" autoCapitalize="words" enterKeyHint="search" />
-          <button onClick={handleCheckAddress} disabled={loading}>{loading ? 'Checking...' : 'Check Sweeping Schedule'}</button>
-          <LocationResultsView pos={mapPos} data={sweepData} />
-        </div>
-      )}
 
       {tab === 'app' && (
         <div role="tabpanel">
@@ -926,7 +790,7 @@ export default function App() {
 
       {tab === 'manual' && (
         <div role="tabpanel">
-          <p style={{ fontSize: '0.85rem', color: '#8b949e', marginBottom: 12 }}>
+          <p className="subtitle">
             Drag the pin to test any Somerville address. Same sweep + side-detection results as the Tesla flow, just driven by you instead of your car.
             {manualLoading && <span style={{ marginLeft: 6, fontStyle: 'italic' }}>(checking…)</span>}
           </p>
@@ -939,8 +803,6 @@ export default function App() {
           />
         </div>
       )}
-
-      {tab === 'test' && <TestSidePanel />}
 
       {error && (
         <div className="error-box" role="alert">
