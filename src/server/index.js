@@ -18,6 +18,7 @@ import {
 import { postSlackDM } from './integrations/slack.js';
 import { reverseGeocodeLocation, nominatimFetch } from './integrations/nominatim.js';
 import { whichSide } from './integrations/overpass.js';
+import { suggestAddress, fetchSweepEvents, parseSweepFlags } from './integrations/recollect.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Repo-root-relative paths anchor on this file's location after the
@@ -41,8 +42,6 @@ const TESLA_APP_REDIRECT_URI = process.env.TESLA_REDIRECT_URI || '';
 const SLACK_CLIENT_ID = process.env.SLACK_CLIENT_ID || '';
 const SLACK_CLIENT_SECRET = process.env.SLACK_CLIENT_SECRET || '';
 const SLACK_REDIRECT_URI = process.env.SLACK_REDIRECT_URI || '';
-const RECOLLECT_BASE = 'https://api.recollect.net/api';
-const RECOLLECT_SERVICE = 349;
 const SLACK_USER_ID_RE = /^U[A-Z0-9]+$/;
 const NOTIFICATIONS_RUN_TOKEN = process.env.NOTIFICATIONS_RUN_TOKEN || '';
 const STUCK_FAIL_THRESHOLD = 3;
@@ -59,38 +58,12 @@ async function runSweepCheck({ address, today_date, past_noon = false, lat, lng 
   const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
   const tomorrowStr = tomorrow.toISOString().slice(0, 10);
 
-  const suggestRes = await fetchWithTimeout(
-    `${RECOLLECT_BASE}/areas/Somerville/services/${RECOLLECT_SERVICE}/address-suggest?${new URLSearchParams({ q: address, locale: 'en-US' })}`,
-    { headers: { 'User-Agent': UA } }
-  );
-  if (!suggestRes.ok) throw new Error(`Recollect address suggest ${suggestRes.status}`);
-  const suggestions = await suggestRes.json();
+  const suggestions = await suggestAddress(address);
   if (!suggestions.length) return { found: false, message: 'Address not found in Somerville sweeping database' };
   const place = suggestions[0];
 
-  const eventsRes = await fetchWithTimeout(
-    `${RECOLLECT_BASE}/places/${place.place_id}/services/${RECOLLECT_SERVICE}/events?${new URLSearchParams({ after: todayStr, before: future.toISOString().slice(0, 10), locale: 'en-US' })}`,
-    { headers: { 'User-Agent': UA } }
-  );
-  if (!eventsRes.ok) throw new Error(`Recollect events ${eventsRes.status}`);
-  const eventsData = await eventsRes.json();
-  const rawEvents = Array.isArray(eventsData) ? eventsData : (eventsData.events || []);
-
-  const sweepEvents = [];
-  for (const event of rawEvents) {
-    if (!event.flags || !event.day) continue;
-    for (const flag of event.flags) {
-      const name = flag.name || '';
-      if (!name.toLowerCase().includes('sweeping')) continue;
-      const m = name.match(/(\d{1,2})(AM|PM)_(\d{1,2})(AM|PM)/);
-      sweepEvents.push({
-        date: event.day,
-        type: name,
-        side: name.includes('EVEN') ? 'even' : name.includes('ODD') ? 'odd' : 'both',
-        time: m ? `${m[1]}:00 ${m[2]} - ${m[3]}:00 ${m[4]}` : name,
-      });
-    }
-  }
+  const rawEvents = await fetchSweepEvents(place.place_id, todayStr, future.toISOString().slice(0, 10));
+  const sweepEvents = parseSweepFlags(rawEvents);
 
   const houseMatch = address.trim().match(/^(\d+)/);
   const parsedHouseNum = houseMatch ? parseInt(houseMatch[1]) : null;
