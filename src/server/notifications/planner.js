@@ -53,11 +53,11 @@ export function classifyWeek({ events = [], carSide = null, sideDetection = null
   const mine = window.find(e => e.side === carSide);
   if (!mine) return { ...base, class: 'safe' };
 
-  const conflict = window.find(e =>
-    e.side === oppositeSide &&
-    daysBetween(mine.date, e.date) >= 1 &&
-    daysBetween(mine.date, e.date) <= TIGHT_FLIP_DAYS
-  );
+  const conflict = window.find(e => {
+    if (e.side !== oppositeSide) return false;
+    const gap = daysBetween(mine.date, e.date);
+    return gap >= 1 && gap <= TIGHT_FLIP_DAYS;
+  });
   if (conflict) return withPrimary(mine, { class: 'tight-flip', conflictEvent: conflict });
 
   const imminent = window.find(e => e.side === oppositeSide && e.date > todayET && e.date < mine.date);
@@ -107,7 +107,7 @@ export function formatPlanDM({ vehicleName, address, plan }) {
       head = `:warning: *Park off-street ${formatDay(e.date)}* — one-sided street, nowhere to flip.`;
       break;
     case 'triple-flip': {
-      const last = plan.windowEvents[plan.windowEvents.length - 1];
+      const last = plan.windowEvents.at(-1);
       const list = plan.windowEvents.map(ev => `${dayOf(ev.date)} ${ev.side.toUpperCase()}`).join(', ');
       head = `:warning: *Park off-street through ${formatDay(last.date)}* — ${plan.windowEvents.length} sweeps this week (${list}).`;
       break;
@@ -135,7 +135,9 @@ export function formatPlanDM({ vehicleName, address, plan }) {
       head = `:warning: Sweep on ${e.side.toUpperCase()} side ${formatDay(e.date)}. *Couldn't auto-detect your side* — open <${APP_URL}> to confirm.`;
       break;
     default:
-      head = `Sweep ${formatDay(e?.date)}.`;
+      // Surface a missing case loudly instead of DMing "Sweep ." — every
+      // class above is exhaustive and `safe` returns early up top.
+      throw new Error(`formatPlanDM: unhandled plan class '${plan.class}'`);
   }
   return `${head}\n${footer(vehicleName, address)}`;
 }
@@ -167,7 +169,7 @@ function digestRecommendation(plan) {
     case 'one-sided-street':
       return `park off-street ${formatDay(e.date)} — no opposite side on this block.`;
     case 'triple-flip':
-      return `park off-street through ${formatDay(plan.windowEvents[plan.windowEvents.length - 1].date)}.`;
+      return `park off-street through ${formatDay(plan.windowEvents.at(-1).date)}.`;
     case 'tight-flip':
       return `flip to ${oppUC} for ${formatDay(e.date)}, then back to ${carUC} by ${dayBefore(opp.date)} (${oppUC} sweeps ${formatDay(opp.date)}).`;
     case 'imminent-opposite':
@@ -219,15 +221,13 @@ function shortTime(t) {
 }
 
 function findSameDayPair(events) {
-  const byDate = {};
+  const seen = new Map(); // date -> first odd/even event seen
   for (const e of events) {
     if (e.side !== 'odd' && e.side !== 'even') continue;
-    (byDate[e.date] ||= []).push(e);
-  }
-  for (const list of Object.values(byDate)) {
-    const sides = new Set(list.map(e => e.side));
-    if (sides.size >= 2) {
-      return { date: list[0].date, evenE: list.find(e => e.side === 'even'), oddE: list.find(e => e.side === 'odd') };
+    const prev = seen.get(e.date);
+    if (!prev) { seen.set(e.date, e); continue; }
+    if (prev.side !== e.side) {
+      return { evenE: prev.side === 'even' ? prev : e, oddE: prev.side === 'odd' ? prev : e };
     }
   }
   return null;

@@ -1,24 +1,20 @@
 {
   "name": "tesla-sweeper",
   "version": "1.0.0",
+  "private": true,
   "type": "module",
+  "workspaces": [
+    "src/server",
+    "src/client"
+  ],
   "scripts": {
-    "dev": "concurrently \"node server.js\" \"vite\"",
-    "build": "vite build",
-    "start": "node server.js",
-    "preview": "vite build && node server.js",
-    "test": "vitest run lib"
-  },
-  "dependencies": {
-    "express": "^4.21.0",
-    "node-cron": "^4.2.1"
+    "dev": "concurrently -k -n srv,cli \"npm:dev -w @tesla-sweeper/server\" \"npm:dev -w @tesla-sweeper/client\"",
+    "build": "npm run build -w @tesla-sweeper/client",
+    "start": "npm run start -w @tesla-sweeper/server",
+    "test": "npm test --workspaces --if-present"
   },
   "devDependencies": {
-    "@preact/preset-vite": "^2.10.5",
     "concurrently": "^9.0.0",
-    "leaflet": "^1.9.4",
-    "preact": "^10.29.1",
-    "vite": "^5.4.0",
     "vitest": "^4.1.5"
   }
 }

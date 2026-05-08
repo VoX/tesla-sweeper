@@ -2,7 +2,11 @@ import { defineConfig } from 'vite';
 import preact from '@preact/preset-vite';
 import { brotliCompressSync, constants } from 'zlib';
 import { readdirSync, readFileSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DIST_DIR = join(__dirname, '..', '..', 'dist');
 
 // Inline the (small) main CSS bundle directly into index.html as a
 // <style> tag. Eliminates the CSS round trip and the brief flash of
@@ -44,12 +48,11 @@ const brotliPrecompress = {
   apply: 'build',
   enforce: 'post',
   closeBundle() {
-    const distDir = join(process.cwd(), 'dist');
-    for (const name of readdirSync(distDir, { recursive: true })) {
+    for (const name of readdirSync(DIST_DIR, { recursive: true })) {
       if (!/\.(js|css|html|svg)$/i.test(name)) continue;
-      const buf = readFileSync(join(distDir, name));
+      const buf = readFileSync(join(DIST_DIR, name));
       if (buf.length < 1024) continue;
-      writeFileSync(join(distDir, name) + '.br', brotliCompressSync(buf, {
+      writeFileSync(join(DIST_DIR, name) + '.br', brotliCompressSync(buf, {
         params: { [constants.BROTLI_PARAM_QUALITY]: 11, [constants.BROTLI_PARAM_SIZE_HINT]: buf.length },
       }));
     }
@@ -57,6 +60,7 @@ const brotliPrecompress = {
 };
 
 export default defineConfig({
+  root: __dirname,
   plugins: [preact(), inlineMainCss, brotliPrecompress],
   base: '/sweeper/',
   server: {
@@ -69,6 +73,13 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: 'dist',
+    // outDir is intentionally outside the project root (repo-root /dist)
+    // so the express server can serve it without a path-walk into the
+    // client workspace. emptyOutDir:true is required to opt into clearing.
+    outDir: DIST_DIR,
+    emptyOutDir: true,
+  },
+  test: {
+    environment: 'happy-dom',
   },
 });

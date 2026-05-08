@@ -1,0 +1,19 @@
+{
+  "name": "@tesla-sweeper/server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "node --watch index.js",
+    "start": "node index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "node-cron": "^4.2.1"
+  },
+  "devDependencies": {
+    "supertest": "^7.0.0"
+  }
+}

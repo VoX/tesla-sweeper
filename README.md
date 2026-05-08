@@ -37,21 +37,33 @@ Subsequent page opens within 6 hours of a successful "Check My Car" hydrate from
 - **Frontend:** Preact + Vite, Leaflet for maps (lazy-loaded)
 - **Assets:** Vite-built bundle plus brotli-precompressed `.br` siblings served by an Express middleware (falls through to gzip via whatever fronts it)
 
+## Repo layout
+
+The repo is an npm workspace coordinating two packages:
+
+```
+src/server/  — @tesla-sweeper/server (express backend)
+src/client/  — @tesla-sweeper/client (preact + vite SPA)
+```
+
+Common commands run from the repo root and fan out to the workspaces.
+
 ## Running locally
 
 ```bash
 cp .env.example .env  # Add your Tesla app + Slack OIDC credentials
-npm install
-npm run dev
+npm install           # installs both workspaces
+npm run dev           # runs server (20040) + vite (5173) concurrently
 ```
 
-Starts both the Express backend (port 20040) and Vite dev server (port 5173) with API proxying. Open `http://localhost:5173/sweeper/`.
+Open `http://localhost:5173/sweeper/`.
 
 For production:
 
 ```bash
-npm run build
-npm start
+npm run build  # builds the client bundle into dist/
+npm start      # runs the server, which serves dist/
+npm test       # runs vitest in both workspaces
 ```
 
 ### Environment variables
