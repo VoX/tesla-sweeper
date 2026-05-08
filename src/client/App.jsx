@@ -1,48 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { loadLeaflet } from './leaflet-loader.js';
-
-const API = import.meta.env.DEV ? '/sweeper/api' : 'api';
-
-// Cache successful vehicle checks for 6h so subsequent page loads
-// hydrate from localStorage instead of waking the car. The "Check My
-// Car" button still bypasses cache when the user wants fresh data.
-const CHECK_CACHE_MS = 6 * 60 * 60 * 1000;
-const CHECK_CACHE_KEY = 'tesla_last_check';
-const CHECK_CACHE_VERSION = 1;
-function readCachedCheck(vehicleId) {
-  if (!vehicleId) return null;
-  try {
-    const c = JSON.parse(localStorage.getItem(CHECK_CACHE_KEY));
-    if (!c || c.v !== CHECK_CACHE_VERSION || c.vehicle_id !== vehicleId) return null;
-    if (Date.now() - c.at > CHECK_CACHE_MS) return null;
-    return c;
-  } catch { return null; }
-}
-function saveCachedCheck(vehicleId, payload) {
-  if (!vehicleId) return;
-  try {
-    localStorage.setItem(CHECK_CACHE_KEY, JSON.stringify({
-      v: CHECK_CACHE_VERSION, vehicle_id: vehicleId, at: Date.now(), ...payload,
-    }));
-  } catch {}
-}
-
-async function handleRes(res) {
-  if (!res.ok) {
-    const e = await res.json().catch(() => ({ detail: 'API error' }));
-    throw new Error(e.detail || 'API error');
-  }
-  return res.json();
-}
-async function post(url, body, signal) {
-  return handleRes(await fetch(`${API}/${url}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal,
-  }));
-}
-async function get(url) { return handleRes(await fetch(`${API}/${url}`)); }
+import { readCachedCheck, saveCachedCheck } from './lib/cache.js';
+import { post, get } from './lib/api.js';
+import { clientToday } from './lib/date.js';
+import { parseSlackInput } from './lib/slack-input.js';
 
 function StatusBox({ status, title, message }) {
   const icon = { danger: '\u{1F6A8}', warning: '\u26A0\uFE0F', safe: '\u2705', info: '\u2139\uFE0F' }[status] || '';
@@ -223,22 +184,6 @@ function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
   );
 }
 
-// sv-SE locale formats dates as YYYY-MM-DD natively in evergreen browsers.
-function clientToday() { return new Date().toLocaleDateString('sv-SE'); }
-
-// Accept either a raw slack user id (U060NLFUM) or a pasted slack URL
-// (https://app.slack.com/team/U..., /user_profile/U..., slack://user?id=U...)
-// and return the extracted U-id. Pass-through if input doesn't look URL-y.
-function parseSlackInput(value) {
-  const v = value.trim();
-  if (!v.includes('/') && !v.includes('?')) return v;
-  // Try the URL-shape patterns first; fall back to any U-id token in
-  // the string for newer Slack web URLs that don't match the legacy
-  // /team/ /user_profile/ /?id= shapes.
-  const m = v.match(/(?:\/(?:team|user_profile)\/|[?&]id=)(U[A-Z0-9]+)/)
-    || v.match(/\b(U[A-Z][A-Z0-9]+)\b/);
-  return m ? m[1] : v;
-}
 
 function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis, notifLoading, notifError, onSlackSignIn, onEnable, onDisable }) {
   return (
