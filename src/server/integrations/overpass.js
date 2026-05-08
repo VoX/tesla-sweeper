@@ -11,12 +11,43 @@ const overpass = (q) =>
   fetchWithTimeout(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(q)}`,
     { headers: { 'User-Agent': UA } });
 
+// 30-day cache keyed on rounded lat/lng — Overpass under load can take
+// 5+s per call and the same parked-car coords are queried repeatedly
+// (cron + manual checks). Cache misses go through a 3-attempt retry
+// loop with 5s in-query timeouts each → 15s ceiling before fallback.
+const SIDE_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const sideCache = new Map();
+const MAX_ATTEMPTS = 3;
+
 export async function whichSide(lat, lng) {
+  const key = `${Number(lat).toFixed(5)},${Number(lng).toFixed(5)}`;
+  const hit = sideCache.get(key);
+  if (hit && Date.now() - hit.at < SIDE_CACHE_TTL_MS) return hit.value;
+  let lastErr;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const result = await whichSideOnce(lat, lng);
+      // Only cache definite parity answers — 'unknown' may improve as
+      // OSM building data fills in, so let it re-probe.
+      if (result.side === 'odd' || result.side === 'even') {
+        sideCache.set(key, { at: Date.now(), value: result });
+      }
+      return result;
+    } catch (e) {
+      lastErr = e;
+      // No backoff between attempts: each carries its own 5s [timeout]
+      // ceiling, so 3× = the 15s budget the caller already expects.
+    }
+  }
+  throw lastErr;
+}
+
+async function whichSideOnce(lat, lng) {
   // Filter to *named* drivable highways — sidewalks/footpaths digitized
   // parallel to the real street would otherwise win the closest-segment
   // race when the pin is near a curb.
   const drivableHighways = '^(residential|primary|secondary|tertiary|unclassified|living_street|trunk|motorway|primary_link|secondary_link|tertiary_link|trunk_link|motorway_link)$';
-  const namedQ = `[out:json][timeout:10];way(around:50,${lat},${lng})[highway~"${drivableHighways}"][name];out geom;`;
+  const namedQ = `[out:json][timeout:5];way(around:50,${lat},${lng})[highway~"${drivableHighways}"][name];out geom;`;
 
   const r0 = await overpass(namedQ);
   if (!r0.ok) throw new Error(`Overpass ${r0.status}`);
@@ -46,7 +77,7 @@ export async function whichSide(lat, lng) {
     // OSM names are public-edit data — escape \ first, then ", then strip
     // control chars so a malformed way name can't break the literal.
     const escName = wayName.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]/g, ' ');
-    const bq = `[out:json][timeout:10];(way(around:80,${best.foot.lat},${best.foot.lng})["building"]["addr:street"="${escName}"];node(around:80,${best.foot.lat},${best.foot.lng})["addr:housenumber"]["addr:street"="${escName}"];);out tags center;`;
+    const bq = `[out:json][timeout:5];(way(around:80,${best.foot.lat},${best.foot.lng})["building"]["addr:street"="${escName}"];node(around:80,${best.foot.lat},${best.foot.lng})["addr:housenumber"]["addr:street"="${escName}"];);out tags center;`;
     try {
       const r = await overpass(bq);
       if (r.ok) {
@@ -137,6 +168,11 @@ function crossSign(A, B, P) {
   const c = dx * py - dy * px;
   return c > 0 ? 1 : c < 0 ? -1 : 0;
 }
+
+// Test hook — flush the side-detection cache so concurrent test cases
+// don't share stale entries. Not exported through the integrations
+// barrel; only used by overpass.test.js directly.
+export function _resetSideCache() { sideCache.clear(); }
 
 function haversineMeters(lat1, lng1, lat2, lng2) {
   const R = 6371000;
