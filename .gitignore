@@ -3,6 +3,7 @@ dist/
 .env
 data/
 keys/
+CLAUDE.local.md
 __pycache__/
 *.pyc
 venv/

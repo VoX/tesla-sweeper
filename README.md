@@ -95,57 +95,6 @@ Uses the [Tesla Fleet API](https://developer.tesla.com/docs/fleet-api) OAuth2 au
 
 Tokens are stored in localStorage for session persistence. Refresh tokens are used to maintain access without re-login. The app is registered with Tesla Fleet API and hosts a public key at `/.well-known/appspecific/com.tesla.3p.public-key.pem`.
 
-## Operations
-
-### Hosting
-- **Box:** EC2 Graviton (4 vCPU / 16 GB) running Amazon Linux 2023, single-tenant.
-- **Reverse proxy:** Caddy on `claw.bitvox.me` with `redir /sweeper /sweeper/ 308` + `handle_path /sweeper/*` doing `encode zstd gzip` and proxying to `localhost:20040`. Brotli `.br` files served by the Express middleware pass through Caddy's `encode` directive untouched.
-- **TLS:** Caddy auto-issues from Let's Encrypt.
-
-### Service
-- **Unit:** `tesla-sweeper.service` (systemd user-level).
-- **Process:** `node server.js` listens on `127.0.0.1:20040`. Restart with `systemctl --user restart tesla-sweeper.service`.
-- **Logs:** `journalctl --user -u tesla-sweeper.service`. Notable lines: `[wake]`, `[check]`, `[vehicles]`, `[cron]`, `[fallback]`, Tesla token errors.
-
-### State on disk
-- **`.env`** (mode 0600) — all credentials. Never committed (gitignored).
-- **`data/subscriptions.json`** (mode 0600, dir mode 0700) — daily-notification subscriptions including Tesla `refresh_token`s, `consecutive_failures`, `last_dm_date`, `last_dm_error_at`. Atomic writes via temp+rename. Gitignored.
-- **`dist/`** — built Preact bundle + brotli `.br` siblings, served by Express's static middleware. Rebuilt with `npm run build`.
-
-### Endpoints (probes / ops)
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /healthz` | Liveness + `{ok, last_run_at, sub_count}` for monitoring |
-| `POST /api/which-side` `{lat, lng}` | OSM side-detection probe (no auth) |
-| `POST /api/sweep-check` `{address, lat, lng, today_date, past_noon}` | Direct sweep check (no auth, lat/lng required as finite numbers in valid range) |
-| `POST /api/notifications/run` (Bearer auth) | Manually fire the daily cron |
-
-### Notification cron
-- **In-process via `node-cron`.** Registered from the `app.listen` callback so the scheduler comes up with the service.
-- `runNotifications()` refreshes each sub's Tesla token (rotating in place via `patchSub`), wakes asleep cars, reverse-geocodes, runs `runSweepCheck`, sends a Slack DM via `chat.postMessage` for any sub with `days_until_next ∈ {1,2,3}` AND a side that matches the user's parked side. Per-sub failures are isolated.
-- **DM dedup**: each successful DM patches `last_dm_date: <todayET>` so a restart between dispatch and `last_run_at` write doesn't re-DM.
-- **Stuck-sub notice**: after 3 consecutive failures, DM the user once ("your sub broke"); 24h cooldown before re-DMing.
-- **Missed-run recovery:** on startup past noon ET with `last_run_at` from a prior date, fire one immediately.
-- `POST /api/notifications/run` (bearer-auth via `NOTIFICATIONS_RUN_TOKEN`) calls the same function for manual triggering.
-
-### Common ops
-
-| Action | Command |
-|---|---|
-| Tail logs | `journalctl --user -u tesla-sweeper -f` |
-| Restart after code change | `npm run build && systemctl --user restart tesla-sweeper.service` |
-| List subscriptions | `cat data/subscriptions.json \| jq` |
-| Trigger run on demand | `curl -X POST -H "Authorization: Bearer $NOTIFICATIONS_RUN_TOKEN" localhost:20040/api/notifications/run` |
-| Liveness check | `curl localhost:20040/healthz` |
-| Side-detection probe | `curl -X POST -d '{"lat":42.385081,"lng":-71.107841}' -H 'Content-Type: application/json' localhost:20040/api/which-side` |
-
-### Failure modes
-- **Tesla token revoked**: cron logs the error, increments `consecutive_failures`, DMs the user after 3 in a row. Other subs unaffected.
-- **Vehicle won't wake**: 60s wake-and-poll ceiling. Sub stays valid; next day's run retries.
-- **Slack `chat.postMessage` fails**: cron-side failures are surfaced in the cron log line and the per-sub `last_result.error`. `dm_sent: false` doesn't get persisted as `last_dm_date`, so next run retries.
-- **Recollect/Nominatim/Overpass outage**: the failing call throws, sub's `last_result.error` records it, no DM sent. Auto-recovers next run.
-
 ## Security model
 
 - **`SESSION_HMAC_KEY` gate**: `/api/notifications/enable` and `/disable` require an HMAC session token issued by `/api/slack/oauth/callback`. Without this binding, anyone with a Tesla refresh_token could subscribe an arbitrary `slack_user_id`. Without the env var set, both endpoints reject every request.
