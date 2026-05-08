@@ -20,7 +20,7 @@ target it.
 - **Single-tenant deploy.** No per-user state — the env flag is
   effectively the deployment's stub-mode preference.
 - **Server-side only.** SPA stays unaware of "stub vs real" beyond a
-  small visual badge; all branching lives in `server.js`.
+  small visual badge; all branching lives in `src/server/index.js`.
 - **Realistic data shape.** Stub responses match Tesla's documented
   vehicle / vehicle_data shapes so the existing client code paths
   don't need parallel branches.
@@ -163,8 +163,8 @@ Trivial; can ship in a follow-up.
 | File | Change |
 |---|---|
 | `.bot.env` (local, not committed) | new env vars |
-| `server.js` | stub constants + 4 branch points (~25 lines net) |
-| `src/App.jsx` | optional `(test)` badge |
+| `src/server/index.js` | stub constants + 4 branch points (~25 lines net) |
+| `src/client/App.jsx` | optional `(test)` badge |
 | `docs/stub-vehicle-plan.md` | this doc |
 
 ## Implementation order
@@ -217,7 +217,7 @@ that commit; the rest stay live.
 
 ## Net diff estimate
 
-- `server.js`: +~30 lines (constants + 4 branch points)
-- `src/App.jsx`: +1 line (badge)
+- `src/server/index.js`: +~30 lines (constants + 4 branch points)
+- `src/client/App.jsx`: +1 line (badge)
 - `.bot.env`: +3 lines (new env vars; not committed)
 - 1 commit per implementation step (5 commits total).

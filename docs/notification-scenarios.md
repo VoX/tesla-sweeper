@@ -182,7 +182,7 @@ Sunday-evening DM with the upcoming week's full schedule and a recommended parki
 
 Ship **Option 3** as a single change:
 
-1. New module `src/notifications/planner.js` exporting `classifyWeek(events, carSide, todayET)` → `{ class, eventDate, oppositeDate, message }`.
+1. New module `src/server/notifications/planner.js` exporting `classifyWeek(events, carSide, todayET)` → `{ class, eventDate, oppositeDate, message }`.
 2. `formatSweepDM` calls `classifyWeek` and renders the message text.
 3. `shouldNotifySweep` becomes `shouldDispatch(plan)` — fires whenever `plan.class !== 'safe'` and `last_dm_date !== todayET` (existing dedup gate stays).
 4. Unit tests for each class with crafted `sweep_events` fixtures. No real Recollect calls in tests — pass synthetic event lists straight to `classifyWeek`.
@@ -193,7 +193,7 @@ Then layer **Option 4** later as a separate cron (Sun 8PM ET) calling a `formatW
 ## Implementation sketch
 
 ```js
-// src/notifications/planner.js
+// src/server/notifications/planner.js
 export function classifyWeek({ events, carSide, todayET }) {
   const today = new Date(todayET + 'T12:00:00Z');
   const window = events.filter(e => daysBetween(e.date, todayET) <= 7);
@@ -243,7 +243,7 @@ Message templates live alongside as a single `MESSAGES[class](plan)` map — eas
 
 ## Net diff estimate
 
-- `src/notifications/planner.js`: ~150 lines (classifier + message templates)
-- `src/notifications/planner.test.js`: ~200 lines (one fixture per class, two-three edge cases each)
+- `src/server/notifications/planner.js`: ~150 lines (classifier + message templates)
+- `src/server/notifications/planner.test.js`: ~200 lines (one fixture per class, two-three edge cases each)
 - `server.js`: ~20 lines net (rip out current `formatSweepDM` + `shouldNotifySweep`, replace with planner call)
 - 1-2 commits.

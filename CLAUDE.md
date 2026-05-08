@@ -4,10 +4,25 @@ Street sweeping checker for Somerville, MA. Tells you if your car needs to move.
 
 ## Architecture
 
-- **Backend:** `server.js` — Express bound to `127.0.0.1` (default port 20040, configurable via `PORT`). Proxies four external APIs (Tesla Fleet, Recollect, Nominatim, OSM Overpass) and serves the built Preact app as static files. Loads creds from `.env`.
-- **Frontend:** `src/App.jsx` — Preact + Vite. Two tabs: **Tesla Login** (OAuth) and **Manual** (drag-the-pin). Both use the same `LocationResultsView` component (map + sweep card + side-detection diagnostic). Leaflet is lazy-loaded via `src/leaflet-loader.js`.
-- **Compression:** Brotli `.br` siblings are pre-built by a `closeBundle` Vite plugin and served by an Express middleware before `express.static`. Whatever reverse proxy fronts the app is expected to pass `Accept-Encoding: br` through; gzip falls through to the proxy.
-- **Storage:** `data/subscriptions.json` (mode 0600, dir 0700, atomic temp+rename writes) — daily-notification subs with Tesla `refresh_token`, `consecutive_failures`, `last_dm_date`, `last_dm_error_at`. Gitignored.
+The repo is an npm workspace with two packages:
+
+- **`src/server/`** (`@tesla-sweeper/server`) — express bound to `127.0.0.1` (default port 20040, configurable via `PORT`). Decomposed into `config.js` (env loader, MUST import first), `app.js` (express bootstrap + route mounting), `index.js` (listen + cron + recovery), plus subdirs:
+  - `crypto/{session,bearer}.js` — HMAC session token + bearer auth
+  - `store/subscriptions.js` — atomic file-backed sub store
+  - `integrations/{tesla,slack,nominatim,overpass,recollect}.js` — external API helpers, each self-contained with its own `fetchWithTimeout`
+  - `sweep/check.js` — `runSweepCheck` composer
+  - `notifications/{planner,cron}.js` — classifier + the noon-ET / Sun-8PM crons
+  - `routes/{vehicles,oauth,notifications,probes}.js` — express Routers
+  - `middleware/{errors,brotli}.js` — `wrap` async-error helper + brotli `.br` serving
+  - `__tests__/` — vitest unit tests for every module
+- **`src/client/`** (`@tesla-sweeper/client`) — Preact + Vite SPA. Two tabs: **Tesla Login** (OAuth) and **Manual** (drag-the-pin). Both use the same `LocationResultsView` (map + sweep card + side-detection diagnostic). Layout:
+  - `App.jsx` — orchestrator: state + tab routing + OAuth callback handling + action handlers
+  - `components/{StatusBox,Row,MapView,SideDetectionCard,SweepResults,LocationResultsView,NotificationsPanel}.jsx`
+  - `lib/{cache,api,date,slack-input}.js` — pure helpers
+  - `leaflet-loader.js` — lazy-load via cached promise
+  - `__tests__/` — vitest + happy-dom + @testing-library/preact
+- **Compression:** Brotli `.br` siblings are pre-built by a `closeBundle` Vite plugin (`src/client/vite.config.js`) writing to repo-root `dist/`, served by `middleware/brotli.js` before `express.static`. Whatever reverse proxy fronts the app should pass `Accept-Encoding: br` through; gzip falls through to the proxy.
+- **Storage:** `data/subscriptions.json` (mode 0600, dir 0700, atomic temp+rename writes) — daily-notification subs with Tesla `refresh_token`, `consecutive_failures`, `last_dm_date`, `last_digest_date`, `last_dm_error_at`. Gitignored.
 - **Notifications:** in-process `node-cron`. Daily `0 12 * * *` America/New_York fires `runNotifications({mode:'daily'})`; weekly `0 20 * * 0` America/New_York fires the Sunday digest (`mode:'weekly'`). Missed-run + missed-digest recovery helpers run on boot if `last_run_at` / `last_digest_run_at` is stale.
 
 ## External APIs
@@ -83,7 +98,7 @@ Lets devs/testers exercise the full flow without owning a Tesla. See `docs/stub-
 
 ## Frontend specifics
 
-- **Lazy leaflet**: `src/leaflet-loader.js` returns a cached promise that imports leaflet + marker assets + leaflet.css on first call. Both `MapView` and the Manual-tab probe path gate map init on `await loadLeaflet()`. The leaflet chunk is ~150 KB raw / 38 KB brotli; only fetched when a map renders. Initial JS bundle is ~35 KB raw / 12 KB brotli.
+- **Lazy leaflet**: `src/client/leaflet-loader.js` returns a cached promise that imports leaflet + marker assets + leaflet.css on first call. Both `MapView` and the Manual-tab probe path gate map init on `await loadLeaflet()`. The leaflet chunk is ~150 KB raw / 38 KB brotli; only fetched when a map renders. Initial JS bundle is ~35 KB raw / 12 KB brotli.
 - **Inline CSS**: a `transformIndexHtml` Vite plugin (`inlineMainCss`) embeds the bundled main CSS as a `<style>` tag in `index.html`. Eliminates the FOUC frame Firefox flagged when `<link rel="stylesheet">` was loaded async after the module script.
 - **Brotli pre-compression**: a `closeBundle` Vite plugin walks `dist/` and writes `.br` siblings for `.js`/`.css`/`.html`/`.svg` files ≥1KB at quality 11. The plugin runs after vite finalizes preload helpers — earlier `generateBundle`-based version compressed un-resolved `__VITE_PRELOAD__` tokens and broke the bundle.
 - **Tab routing**: `?tab=manual` persists; `?tab=app` is the default and gets stripped from the URL. Legacy `?tab=address|test|address=foo` falls through to the default.
@@ -124,7 +139,7 @@ Vite proxies `/sweeper/api/*` to `localhost:20040` in dev mode. The React-style 
 - **Token endpoint domain:** Use `fleet-auth.prd.vn.cloud.tesla.com` for token exchange, NOT `auth.tesla.com`.
 - **Content-Type for tokens:** Tesla requires `application/x-www-form-urlencoded`, not JSON.
 - **Leaflet popup XSS:** Use `textContent`/`createTextNode` for popup content; never template strings with `bindPopup`. Street names come from Nominatim and are untrusted.
-- **Leaflet marker icons:** Imported from leaflet's dist images via `src/leaflet-loader.js` to override `L.Icon.Default` options. Vite's marker-icon URL handling needs this or the default icons 404.
+- **Leaflet marker icons:** Imported from leaflet's dist images via `src/client/leaflet-loader.js` to override `L.Icon.Default` options. Vite's marker-icon URL handling needs this or the default icons 404.
 - **Preact onChange:** Native DOM `change` semantic — fires on blur for text inputs. Use `onInput` for controlled inputs.
 - **Tesla vehicle IDs > MAX_SAFE_INTEGER:** Always `String()`-coerce when comparing in JS. `/api/notifications/enable` does this for the account check + the dedup filter; tests should round-trip via JSON to catch precision bugs.
 - **`SESSION_HMAC_KEY` missing:** All `/enable` + `/disable` requests 403. Boot logs `[boot] SESSION_HMAC_KEY unset…`. Generate with `openssl rand -hex 32` and put in `.env`.
