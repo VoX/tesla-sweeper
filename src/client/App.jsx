@@ -7,26 +7,8 @@ import { parseSlackInput } from './lib/slack-input.js';
 import { StatusBox } from './components/StatusBox.jsx';
 import { Row } from './components/Row.jsx';
 import { MapView } from './components/MapView.jsx';
-
-// Diagnostic card for OSM-based side detection. Renders nothing when
-// detection is null (e.g. no coords were sent or whichSide threw).
-function SideDetectionCard({ detection }) {
-  if (!detection) return null;
-  const sideColor = detection.side === 'odd' ? '#d29922' : detection.side === 'even' ? '#3fb950' : '#8b949e';
-  return (
-    <div className="card">
-      <h3>Side detection</h3>
-      <Row label="Side" value={<strong style={{ color: sideColor }}>{detection.side?.toUpperCase() || 'UNKNOWN'}</strong>} />
-      {detection.side === 'unknown' && detection.error && <Row label="Reason" value={detection.error} />}
-      <Row label="Road" value={detection.road_name || '\u2014'} />
-      <Row label="Offset from centerline" value={detection.perpendicular_offset_m != null ? `${detection.perpendicular_offset_m} m` : '\u2014'} />
-      <Row label="Cross sign" value={detection.cross_sign != null ? String(detection.cross_sign) : '—'} />
-      <Row label="Car-side house #" value={detection.car_house_number ?? '\u2014'} />
-      <Row label="Opposite-side house #" value={detection.opposite_house_number ?? '\u2014'} />
-      <Row label="OSM way id" value={detection.way_id ?? '\u2014'} />
-    </div>
-  );
-}
+import { SideDetectionCard } from './components/SideDetectionCard.jsx';
+import { SweepResults } from './components/SweepResults.jsx';
 
 // Shared results view used by Tesla Login + Manual tabs. The two tabs
 // differ only in how `pos` is sourced (Tesla API vs. drag) and whether
@@ -54,60 +36,6 @@ function LocationResultsView({ pos, draggable, onPinMove, data, vehicleInfo, pop
     </>
   );
 }
-
-function SweepResults({ data, vehicleName, fullAddr, lat, lng }) {
-  if (!data?.found) return null;
-
-  const sides = data.sweep_events?.length
-    ? [...new Set(data.sweep_events.map(e => e.side))].map(s => s + ' side').join(' & ')
-    : null;
-
-  return (
-    <>
-      <StatusBox status={data.status} title={data.title} message={data.message} />
-      {data.sweep_events?.length > 0 && (
-        <div className="card">
-          <h3>Upcoming Sweeping Events</h3>
-          {data.sweep_events.slice(0, 8).map((evt, i) => {
-            const yourSide = evt.side === 'both' || (data.car_side && evt.side === data.car_side);
-            const evtDate = new Date(evt.date + 'T12:00:00');
-            const todayMid = new Date(clientToday() + 'T12:00:00');
-            const daysAway = Math.round((evtDate - todayMid) / 86400000);
-            const daysLabel = daysAway === 0 ? 'today' : daysAway === 1 ? 'tomorrow' : `${daysAway} days`;
-            return (
-              <div className={`event ${yourSide ? 'event-yours' : 'event-other'}`} key={i}>
-                <span className="event-date">
-                  {evtDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })} ({daysLabel})
-                  {yourSide && <span className="event-badge">YOUR SIDE</span>}
-                </span>
-                <span className="event-side">{evt.side} side &middot; {evt.time}</span>
-              </div>
-            );
-          })}
-        </div>
-      )}
-      <div className="card">
-        <h3>Details</h3>
-        <Row label="Address" value={
-          // When OSM detection has the car-side road + number, build
-          // the address from those (consistent with what the server's
-          // sweep message references). Otherwise fall back to the
-          // Recollect place_name.
-          data.side_detection?.road_name && data.house_num
-            ? `${data.house_num} ${data.side_detection.road_name}`
-            : (data.place_name || fullAddr || '')
-        } />
-        {data.car_side && <Row label="Your Side" value={`${data.car_side}${data.house_num ? ` (#${data.house_num})` : ''}${data.side_source === 'osm' ? ' · OSM-verified' : data.side_source === 'house_parity' ? ' · estimated' : ''}`} />}
-        {data.days_until_next != null && <Row label="Next Sweep" value={data.days_until_next === 0 ? 'Today' : data.days_until_next === 1 ? 'Tomorrow' : `In ${data.days_until_next} days`} />}
-        {vehicleName && <Row label="Vehicle" value={vehicleName} />}
-        {lat != null && <Row label="Coordinates" value={`${lat.toFixed(5)}, ${lng.toFixed(5)}`} />}
-        {sides && <Row label="Sweeping Rules" value={`${sides} \u00B7 ${data.sweep_events[0]?.time}`} />}
-        <Row label="Data Source" value="City of Somerville / Recollect" />
-      </div>
-    </>
-  );
-}
-
 
 function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis, notifLoading, notifError, onSlackSignIn, onEnable, onDisable }) {
   return (
