@@ -104,7 +104,7 @@ export async function whichSide(lat, lng) {
 
   return {
     side,
-    road_name: best.way.tags?.name || best.way.tags?.ref || 'unknown',
+    road_name: wayName || best.way.tags?.ref || 'unknown',
     perpendicular_offset_m: Math.round(offsetM * 10) / 10,
     cross_sign: cross,
     car_house_number: carNum,

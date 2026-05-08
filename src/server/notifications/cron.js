@@ -93,11 +93,16 @@ export async function runNotifications({ mode = 'daily' } = {}) {
       // Track consecutive_failures so we can DM the user once their
       // sub stops working (Tesla token revoked, vehicle removed, etc).
       out.consecutive_failures = out.ok ? 0 : (sub.consecutive_failures || 0) + 1;
-      patchSub(sub.id, {
+      const persist = {
         last_check_at: new Date().toISOString(),
         last_result: { ok: out.ok, days_until_next: out.days_until_next, error: out.error },
         consecutive_failures: out.consecutive_failures,
-      });
+      };
+      // Recovery: clear the stuck-DM cooldown timestamp so a future
+      // outage can DM immediately instead of waiting up to 24h on a
+      // stale `last_dm_error_at` from the prior failure window.
+      if (out.ok && sub.last_dm_error_at) persist.last_dm_error_at = null;
+      patchSub(sub.id, persist);
       out.last_dm_error_at = sub.last_dm_error_at || null;
       out.last_dm_date = sub.last_dm_date || null;
       out.last_digest_date = sub.last_digest_date || null;
@@ -209,7 +214,7 @@ export function maybeRecoverMissedRun() {
   const todayET = fmtDate.format(new Date());
   const hourET = parseInt(fmtHour.format(new Date()), 10);
   if (hourET < 12) return null;
-  const last = loadStore().last_run_at || null;
+  const last = loadStore().last_run_at;
   const lastDateET = last ? fmtDate.format(new Date(last)) : null;
   if (lastDateET === todayET) return null;
   console.log(`[cron] recovering missed run (last: ${lastDateET || 'never'}, today: ${todayET})`);
@@ -226,7 +231,7 @@ export function maybeRecoverMissedDigest() {
   const parts = Object.fromEntries(fmtParts.formatToParts(now).map(p => [p.type, p.value]));
   if (parts.weekday !== 'Sun' || parseInt(parts.hour, 10) < 20) return null;
   const todayET = fmtDate.format(now);
-  const last = loadStore().last_digest_run_at || null;
+  const last = loadStore().last_digest_run_at;
   const lastDateET = last ? fmtDate.format(new Date(last)) : null;
   if (lastDateET === todayET) return null;
   console.log(`[cron] recovering missed digest (last: ${lastDateET || 'never'}, today: ${todayET})`);

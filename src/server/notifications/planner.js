@@ -107,7 +107,7 @@ export function formatPlanDM({ vehicleName, address, plan }) {
       head = `:warning: *Park off-street ${formatDay(e.date)}* — one-sided street, nowhere to flip.`;
       break;
     case 'triple-flip': {
-      const last = plan.windowEvents[plan.windowEvents.length - 1];
+      const last = plan.windowEvents.at(-1);
       const list = plan.windowEvents.map(ev => `${dayOf(ev.date)} ${ev.side.toUpperCase()}`).join(', ');
       head = `:warning: *Park off-street through ${formatDay(last.date)}* — ${plan.windowEvents.length} sweeps this week (${list}).`;
       break;
@@ -169,7 +169,7 @@ function digestRecommendation(plan) {
     case 'one-sided-street':
       return `park off-street ${formatDay(e.date)} — no opposite side on this block.`;
     case 'triple-flip':
-      return `park off-street through ${formatDay(plan.windowEvents[plan.windowEvents.length - 1].date)}.`;
+      return `park off-street through ${formatDay(plan.windowEvents.at(-1).date)}.`;
     case 'tight-flip':
       return `flip to ${oppUC} for ${formatDay(e.date)}, then back to ${carUC} by ${dayBefore(opp.date)} (${oppUC} sweeps ${formatDay(opp.date)}).`;
     case 'imminent-opposite':

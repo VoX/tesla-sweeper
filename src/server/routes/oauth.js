@@ -22,14 +22,20 @@ const SLACK_REDIRECT_URI = process.env.SLACK_REDIRECT_URI || '';
 // origin could circumvent). 10min TTL covers a sane redirect→exchange
 // window; entries are deleted on use (one-shot).
 const STATE_TTL_MS = 10 * 60 * 1000;
+// Hard cap so an unauthenticated /start flood can't grow the registry
+// to tens of MB even within the TTL window. 10k entries × ~80B = ~800K,
+// fine for our scale (a single human user). Past the cap we GC and, if
+// still full, refuse new mints (caller gets a 503).
+const STATE_MAX_ENTRIES = 10_000;
 const stateStore = new Map();
 function mintState(type) {
-  const state = randomBytes(32).toString('base64url');
-  stateStore.set(state, { type, expires_at: Date.now() + STATE_TTL_MS });
   // Lazy GC on each mint — keeps the map from growing unbounded if a
   // user starts but never finishes flows. O(N) but N ≤ a handful.
   const now = Date.now();
   for (const [k, v] of stateStore) if (v.expires_at < now) stateStore.delete(k);
+  if (stateStore.size >= STATE_MAX_ENTRIES) return null;
+  const state = randomBytes(32).toString('base64url');
+  stateStore.set(state, { type, expires_at: now + STATE_TTL_MS });
   return state;
 }
 function consumeState(state, expectedType) {
@@ -45,6 +51,7 @@ export const oauthRouter = Router();
 oauthRouter.post('/api/oauth/app/start', (req, res) => {
   if (!TESLA_APP_CLIENT_ID) return res.status(500).json({ detail: 'App OAuth not configured' });
   const state = mintState('tesla');
+  if (!state) return res.status(503).json({ detail: 'OAuth state registry full — try again' });
   const scope = 'openid offline_access vehicle_device_data vehicle_location';
   const params = new URLSearchParams({ response_type: 'code', client_id: TESLA_APP_CLIENT_ID, redirect_uri: TESLA_APP_REDIRECT_URI, scope, state, prompt: 'login', locale: 'en-US' });
   res.json({ url: `https://auth.tesla.com/oauth2/v3/authorize?${params}`, state });
@@ -74,6 +81,7 @@ oauthRouter.post('/api/oauth/app/refresh', wrap(async (req, res) => {
 oauthRouter.post('/api/slack/oauth/start', (req, res) => {
   if (!SLACK_CLIENT_ID) return res.status(500).json({ detail: 'Slack OAuth not configured' });
   const state = mintState('slack');
+  if (!state) return res.status(503).json({ detail: 'OAuth state registry full — try again' });
   const params = new URLSearchParams({
     response_type: 'code',
     client_id: SLACK_CLIENT_ID,

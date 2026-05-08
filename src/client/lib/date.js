@@ -5,3 +5,10 @@
 export function clientToday() {
   return new Date().toLocaleDateString('sv-SE');
 }
+
+// True when the user's local clock has passed noon. Sent to the
+// server as `past_noon` so sweep-check can decide whether today's
+// sweeping window is already over.
+export function pastNoon() {
+  return new Date().getHours() >= 12;
+}

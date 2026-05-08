@@ -28,6 +28,17 @@ export function MapView({ lat, lng, street, segment, draggable, onPinMove, popup
 
   useEffect(() => {
     if (!L || !mapRef.current || lat == null) return;
+    // Detect a stale instance: if we still hold a leaflet map but its
+    // container DOM node was unmounted (parent dropped pos to null and
+    // re-rendered us with a fresh div), the bound div is dead and any
+    // setView/setLatLng would draw into nothing. Tear down so the
+    // create branch below rebuilds against the live ref.
+    if (mapInstance.current && mapInstance.current.getContainer() !== mapRef.current) {
+      mapInstance.current.remove();
+      mapInstance.current = null;
+      markerRef.current = null;
+      overlaysRef.current = [];
+    }
     if (!mapInstance.current) {
       mapInstance.current = L.map(mapRef.current).setView([lat, lng], 17);
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(mapInstance.current);

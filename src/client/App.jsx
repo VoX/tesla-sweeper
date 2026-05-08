@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { readCachedCheck, saveCachedCheck, clearCachedCheck } from './lib/cache.js';
 import { post, get } from './lib/api.js';
-import { clientToday } from './lib/date.js';
+import { clientToday, pastNoon } from './lib/date.js';
 import { LocationResultsView } from './components/LocationResultsView.jsx';
 import { NotificationsPanel } from './components/NotificationsPanel.jsx';
 
@@ -63,14 +63,25 @@ export default function App() {
   const manualInflightRef = useRef(null);
 
   // Abort any in-flight manual probe on tab switch so its result
-  // doesn't land into a tab you've left. The tabs use disjoint state
-  // (app: sweepData/mapPos/vehicleInfo, manual: manualSweepData/
-  // manualPos) so cross-tab cached results are fine to preserve —
-  // returning to a tab you already loaded just shows the prior view
-  // instead of forcing a re-check.
+  // doesn't land into a tab you've left, and cancel a pending pin-drag
+  // debounce so it doesn't fire 300ms after the user has navigated
+  // away. The tabs use disjoint state (app: sweepData/mapPos/
+  // vehicleInfo, manual: manualSweepData/manualPos) so cross-tab
+  // cached results are fine to preserve — returning to a tab you
+  // already loaded just shows the prior view instead of forcing a
+  // re-check.
   useEffect(() => {
     manualInflightRef.current?.abort();
+    clearTimeout(pinDebounceRef.current);
   }, [tab]);
+
+  // One-shot unmount cleanup — drops pending debounce + toast timers
+  // so they don't fire setState on a torn-down component (e.g. user
+  // navigates away mid-debounce or right after a toast triggers).
+  useEffect(() => () => {
+    clearTimeout(toastTimerRef.current);
+    clearTimeout(pinDebounceRef.current);
+  }, []);
 
   const [slackUserId, setSlackUserId] = useState(() => localStorage.getItem('tesla_slack_user_id') || '');
   const [subscriptions, setSubscriptions] = useState(null);
@@ -320,7 +331,7 @@ export default function App() {
       return;
     }
 
-    const data = await post('sweep-check', { address: addr, today_date: clientToday(), past_noon: new Date().getHours() >= 12, lat: vehicle.latitude, lng: vehicle.longitude });
+    const data = await post('sweep-check', { address: addr, today_date: clientToday(), past_noon: pastNoon(), lat: vehicle.latitude, lng: vehicle.longitude });
     if (data.found) {
       setSweepData(data);
       saveCachedCheck(vehicleId, { mapPos: mapPosVal, vehicleInfo: vehicleInfoVal, sweepData: data });
@@ -354,7 +365,7 @@ export default function App() {
       const addr = addrFromGeo(geo) || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
       if (!ctrl.signal.aborted) setManualPos({ lat, lng, street: geo.street || 'Unknown' });
       const data = await post('sweep-check', {
-        address: addr, today_date: clientToday(), past_noon: new Date().getHours() >= 12, lat, lng,
+        address: addr, today_date: clientToday(), past_noon: pastNoon(), lat, lng,
       }, ctrl.signal);
       if (!ctrl.signal.aborted) setManualSweepData(data);
     } catch (e) {

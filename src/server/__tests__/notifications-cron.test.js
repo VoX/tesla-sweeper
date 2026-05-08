@@ -89,9 +89,32 @@ describe('runNotifications dispatch', () => {
   it("daily mode sends a DM via formatPlanDM when plan triggers", async () => {
     const out = await runNotifications({ mode: 'daily' });
     // Sweep-check returns days_until_next=1, side=even — planner would fire.
-    // The mock `runSweepCheck` returns a complete shape; the cron's planner
-    // call shouldn't throw and should produce a plan that dispatches.
     expect(out.results[0].plan).toBeDefined();
+    // Must actually have called postSlackDM with the addressed user. A
+    // green test on plan-defined alone would silently pass even if the
+    // dispatch loop were deleted.
+    expect(postSlackDM).toHaveBeenCalledWith('U060NLFUM', expect.stringContaining('Move'));
+    // And persisted last_dm_date so a same-day re-run dedupes.
+    const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+    expect(patchSub).toHaveBeenCalledWith('sub1', { last_dm_date: todayET });
+  });
+
+  it('clears last_dm_error_at on recovery so a future outage can DM immediately', async () => {
+    // Sub had a stuck-DM cooldown set last week; this run succeeds.
+    loadStore.mockReturnValue({
+      subscriptions: [{
+        id: 'sub1', slack_user_id: 'U060NLFUM', vehicle_id: 999999999999999,
+        vehicle_name: 'Test Vehicle', refresh_token: 'STUB_REFRESH_TOKEN',
+        last_dm_error_at: '2026-04-30T17:00:00.000Z',
+        consecutive_failures: 5,
+      }],
+    });
+    await runNotifications({ mode: 'daily' });
+    // The persist call should include last_dm_error_at: null. Find it.
+    const persistCall = patchSub.mock.calls.find(([id, patch]) => id === 'sub1' && 'last_check_at' in patch);
+    expect(persistCall).toBeDefined();
+    expect(persistCall[1].last_dm_error_at).toBeNull();
+    expect(persistCall[1].consecutive_failures).toBe(0);
   });
 
   it('weekly mode uses last_digest_date for dedup', async () => {
