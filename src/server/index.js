@@ -2,13 +2,14 @@ import express from 'express';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { randomBytes } from 'node:crypto';
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
+import { readFileSync } from 'fs';
 import cron from 'node-cron';
 import { classifyWeek, shouldDispatchPlan, formatPlanDM, formatWeeklyDigest } from './notifications/planner.js';
 import { wrap } from './middleware/errors.js';
 import { brotliMiddleware } from './middleware/brotli.js';
 import { signSession, verifySession } from './crypto/session.js';
 import { bearerOk } from './crypto/bearer.js';
+import { loadStore, saveStore, loadSubs, saveSubs, publicSub, patchSub } from './store/subscriptions.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Repo-root-relative paths anchor on this file's location after the
@@ -72,42 +73,9 @@ async function nominatimFetch(url, options) {
 
 const TESLA_TOKEN_URL = 'https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token';
 
-// Subscriptions for daily sweep notifications. File holds Tesla
-// refresh_tokens — mode 0600, never logged. Atomic write via temp+rename
-// so a crash mid-write doesn't truncate the store.
-const SUBS_DIR = join(REPO_ROOT, 'data');
-const SUBS_FILE = join(SUBS_DIR, 'subscriptions.json');
 const NOTIFICATIONS_RUN_TOKEN = process.env.NOTIFICATIONS_RUN_TOKEN || '';
 const STUCK_FAIL_THRESHOLD = 3;
 const STUCK_DM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
-mkdirSync(SUBS_DIR, { recursive: true, mode: 0o700 });
-function loadStore() {
-  let raw;
-  try { raw = readFileSync(SUBS_FILE, 'utf8'); }
-  catch (e) {
-    if (e.code === 'ENOENT') return { subscriptions: [] };
-    throw e;
-  }
-  try { return JSON.parse(raw); }
-  catch (e) {
-    // Preserve corrupt file aside instead of silently nuking subs —
-    // a single bad byte would otherwise lose all rotated tokens.
-    const aside = `${SUBS_FILE}.corrupt.${Date.now()}`;
-    try { renameSync(SUBS_FILE, aside); } catch {}
-    console.error(`[store] parse failed, moved aside to ${aside}: ${e.message}`);
-    return { subscriptions: [] };
-  }
-}
-function saveStore(store) {
-  const tmp = SUBS_FILE + '.tmp';
-  writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 });
-  renameSync(tmp, SUBS_FILE);
-}
-function loadSubs() { return loadStore().subscriptions || []; }
-function saveSubs(subs) { const s = loadStore(); s.subscriptions = subs; saveStore(s); }
-function publicSub(s) {
-  return { id: s.id, slack_user_id: s.slack_user_id, vehicle_name: s.vehicle_name, vehicle_id: s.vehicle_id, created_at: s.created_at, last_check_at: s.last_check_at };
-}
 
 // Wake an asleep vehicle and poll until it reports online. Returns
 // true on success, false on timeout. Caller should retry vehicle_data
@@ -748,17 +716,6 @@ function buildPlan(out, todayET) {
 // Single-flight guard. Both the in-process cron and the HTTP /run
 // endpoint call runNotifications; without this, two concurrent loads
 // would fight on the rotated refresh_token rename and brick a sub.
-// Apply a partial update to one sub by id, re-loading the store so any
-// concurrent /enable or /disable during the run is preserved. Drops the
-// patch if the sub was disabled mid-run.
-function patchSub(subId, patch) {
-  const store = loadStore();
-  const sub = (store.subscriptions || []).find(s => s.id === subId);
-  if (!sub) return;
-  Object.assign(sub, patch);
-  saveStore(store);
-}
-
 let runningNotifications = null;
 let runningMode = null;
 async function runNotifications({ mode = 'daily' } = {}) {
