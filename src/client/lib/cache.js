@@ -25,3 +25,7 @@ export function saveCachedCheck(vehicleId, payload) {
     }));
   } catch {}
 }
+
+export function clearCachedCheck() {
+  try { localStorage.removeItem(CHECK_CACHE_KEY); } catch {}
+}

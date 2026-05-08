@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { loadLeaflet } from './leaflet-loader.js';
-import { readCachedCheck, saveCachedCheck } from './lib/cache.js';
+import { readCachedCheck, saveCachedCheck, clearCachedCheck } from './lib/cache.js';
 import { post, get } from './lib/api.js';
 import { clientToday } from './lib/date.js';
 import { parseSlackInput } from './lib/slack-input.js';
@@ -9,33 +9,7 @@ import { Row } from './components/Row.jsx';
 import { MapView } from './components/MapView.jsx';
 import { SideDetectionCard } from './components/SideDetectionCard.jsx';
 import { SweepResults } from './components/SweepResults.jsx';
-
-// Shared results view used by Tesla Login + Manual tabs. The two tabs
-// differ only in how `pos` is sourced (Tesla API vs. drag) and whether
-// the marker is interactive \u2014 everything below is identical.
-function LocationResultsView({ pos, draggable, onPinMove, data, vehicleInfo, popupLabel }) {
-  return (
-    <>
-      <MapView
-        lat={pos?.lat}
-        lng={pos?.lng}
-        street={pos?.street}
-        segment={data?.side_detection?.segment}
-        draggable={draggable}
-        onPinMove={onPinMove}
-        popupLabel={popupLabel}
-      />
-      <SweepResults
-        data={data}
-        vehicleName={vehicleInfo?.name}
-        fullAddr={vehicleInfo?.addr}
-        lat={pos?.lat}
-        lng={pos?.lng}
-      />
-      <SideDetectionCard detection={data?.side_detection} />
-    </>
-  );
-}
+import { LocationResultsView } from './components/LocationResultsView.jsx';
 
 function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis, notifLoading, notifError, onSlackSignIn, onEnable, onDisable }) {
   return (
@@ -176,7 +150,7 @@ export default function App() {
       }
     } else {
       localStorage.removeItem('tesla_tokens');
-      localStorage.removeItem(CHECK_CACHE_KEY);
+      clearCachedCheck();
     }
   }, [tokens]);
 
@@ -205,7 +179,7 @@ export default function App() {
     // Clear cached check directly — the localStorage useEffect only
     // runs when the value differs, and a stale `tesla_last_check`
     // would otherwise survive a logout/login cycle.
-    try { localStorage.removeItem(CHECK_CACHE_KEY); } catch {}
+    clearCachedCheck();
     reset();
   };
 
