@@ -40,11 +40,90 @@ The planner under `lib/` is the only piece already modularized; everything else 
 - **Test runner stays vitest.** Already installed for the planner; reuse for new server + client tests.
 - **Import paths**: ES modules with explicit `.js` / `.jsx` extensions (matches current style and `type:"module"` package).
 
+## Workspace layout (npm workspaces)
+
+The root `package.json` becomes a [workspace coordinator](https://docs.npmjs.com/cli/v8/using-npm/workspaces); each of `src/server/` and `src/client/` gets its own `package.json` declaring only the deps it actually uses. `npm install` at the root installs everything, hoisting common deps (vitest, etc.) to the top-level `node_modules/`.
+
+**Why workspaces vs one root `package.json`:**
+- Client deps (`preact`, `leaflet`, `vite`, `@preact/preset-vite`) and server deps (`express`, `node-cron`) stop sharing a manifest. Easier to spot what's pulling what.
+- A future "split deploy" (publishing the planner module, or shipping a separate API artifact) becomes trivial — each workspace is already self-describing.
+- Per-workspace test runs (`npm test -w @tesla-sweeper/server`) make CI sharding easy when/if we add CI.
+
+**Root `package.json`:**
+
+```json
+{
+  "name": "tesla-sweeper",
+  "private": true,
+  "type": "module",
+  "workspaces": ["src/server", "src/client"],
+  "scripts": {
+    "dev": "concurrently -k -n srv,cli -c blue,magenta \"npm run dev -w @tesla-sweeper/server\" \"npm run dev -w @tesla-sweeper/client\"",
+    "build": "npm run build -w @tesla-sweeper/client",
+    "start": "npm run start -w @tesla-sweeper/server",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "devDependencies": { "concurrently": "^9.0.0" }
+}
+```
+
+**`src/server/package.json`:**
+
+```json
+{
+  "name": "@tesla-sweeper/server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "dev": "node --watch index.js",
+    "start": "node index.js",
+    "test": "vitest run"
+  },
+  "dependencies": { "express": "^4.21.0", "node-cron": "^4.2.1" },
+  "devDependencies": { "vitest": "^4.1.5", "supertest": "^7.0.0" }
+}
+```
+
+**`src/client/package.json`:**
+
+```json
+{
+  "name": "@tesla-sweeper/client",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "dependencies": { "preact": "^10.29.1", "leaflet": "^1.9.4" },
+  "devDependencies": {
+    "vite": "^5.4.0",
+    "@preact/preset-vite": "^2.10.5",
+    "vitest": "^4.1.5",
+    "happy-dom": "^15.0.0"
+  }
+}
+```
+
+`vite.config.js` and `index.html` move into `src/client/` (Vite runs from there). `vite.config.js` sets `build.outDir: '../../dist'` so the server still serves a top-level `dist/` — the brotli middleware path stays unchanged. The brotli `closeBundle` plugin moves alongside.
+
+The server reads `data/subscriptions.json` and the brotli `.br` files from `dist/` via paths anchored on `process.cwd()`, which stays the repo root regardless of which workspace ran (because `npm run start -w server` invokes the script with cwd = `src/server/` — so we either swap to `__dirname`-relative paths anchored at `src/server/index.js` and walking `../../dist/`, or pin `cwd` in the systemd unit file). Phase 1 picks the `__dirname`-relative version since it's portable.
+
+**Single `package-lock.json` at root.** npm workspaces share one lockfile; each workspace's `node_modules/` is symlinked into the hoisted store.
+
 ## Target tree
 
 ```
+package.json                  ── root: workspaces declaration + orchestration scripts
+package-lock.json             ── single lockfile for the workspace
 src/
   server/
+    package.json              ── @tesla-sweeper/server: express, node-cron, vitest, supertest
     index.js                  ── entry — boot, cron registration, app.listen, recovery
     app.js                    ── express app construction + route mounting
     config.js                 ── env loading + constants (TESLA_*, SLACK_*, STUB_*, etc.)
@@ -80,10 +159,13 @@ src/
       notifications-cron.test.js ── new
       routes.test.js          ── new (supertest-based)
   client/
-    main.jsx                  ── moved (entrypoint, mounts <App/>)
+    package.json              ── @tesla-sweeper/client: preact, leaflet, vite, vitest, happy-dom
+    vite.config.js            ── moved from root; build.outDir = '../../dist'
+    index.html                ── moved from root; references main.jsx
+    main.jsx                  ── entrypoint, mounts <App/>
     App.jsx                   ── orchestrator only (~150 lines: state, tab logic, OAuth callback handling)
-    App.css                   ── moved
-    leaflet-loader.js         ── moved
+    App.css
+    leaflet-loader.js
     components/
       StatusBox.jsx
       Row.jsx
@@ -104,31 +186,58 @@ src/
       slack-input.test.js
 ```
 
-`lib/` at repo root is removed (planner moves to `src/server/notifications/`). `vite.config.js`, `index.html`, `package.json` stay at root and update their paths.
+`lib/` at repo root is removed (planner moves to `src/server/notifications/`). Vite config + `index.html` follow the client into `src/client/`. The `dist/` build artifact still emits at the repo root (`build.outDir: '../../dist'`) so the server's path resolution doesn't change.
 
 ## Phases
 
 Each phase = one commit (or a tight series of commits, all of which leave the build green). Live restart only on phases that touch server runtime (1, 2, 6).
 
-### Phase 1 — Skeleton move (no decomposition)
+### Phase 1 — Skeleton move + workspace setup (no decomposition)
 
-Smallest first commit. Just move files into the new tree without splitting them. Verify `npm run build`, `npm test`, and `node src/server/index.js` all still work.
+Files move into the new tree and the root `package.json` becomes a workspace coordinator. No code is split yet. Verify `npm install`, `npm run build`, `npm run start`, and `npm test` all still work end-to-end.
 
-- Create `src/server/` and `src/client/` dirs.
+**1.1 — Move files** (one commit):
 - `git mv server.js → src/server/index.js`
 - `git mv src/App.jsx → src/client/App.jsx`
 - `git mv src/main.jsx → src/client/main.jsx`
 - `git mv src/App.css → src/client/App.css`
 - `git mv src/leaflet-loader.js → src/client/leaflet-loader.js`
-- `git mv lib/notification-planner.js → src/server/notifications/planner.js` (with subdir creation)
+- `git mv index.html → src/client/index.html`
+- `git mv vite.config.js → src/client/vite.config.js`
+- `git mv lib/notification-planner.js → src/server/notifications/planner.js`
 - `git mv lib/notification-planner.test.js → src/server/__tests__/planner.test.js`
-- Update relative imports inside the moved files (mostly the planner import path in `index.js`).
-- Update `package.json` `start` script: `node src/server/index.js`
-- Update `package.json` `test` script: `vitest run src/server src/client`
-- Update `index.html` `src/main.jsx` reference to `src/client/main.jsx`
-- Update `vite.config.js` if needed (`root` stays at repo root)
+- `rmdir lib/`
 
-**Checkpoints:** build, run tests, restart service, hit `/healthz`, hit `/sweeper/`.
+**1.2 — Workspace package layout** (same commit or follow-up):
+- Author `src/server/package.json` (express, node-cron, vitest, supertest, scripts: `start`, `dev`, `test`).
+- Author `src/client/package.json` (preact, leaflet, vite, @preact/preset-vite, vitest, happy-dom, scripts: `dev`, `build`, `preview`, `test`).
+- Rewrite root `package.json`: `private: true`, `workspaces: ["src/server", "src/client"]`, scripts that fan out (`dev` via `concurrently`, `build` → client only, `start` → server only, `test` via `--workspaces --if-present`). Keep `concurrently` as the only root devDep.
+- `rm package-lock.json && npm install` from repo root — npm rebuilds the lockfile against the new workspace structure.
+
+**1.3 — Path adjustments inside moved files:**
+- `src/server/index.js`:
+  - Update planner import: `'./notifications/planner.js'` (was `./lib/notification-planner.js`).
+  - Replace path resolution that uses `__dirname + 'data/...'` with paths relative to the repo root via `__dirname + '../../data/...'` and the same for `dist/`. The server is invoked from `src/server/` (npm workspace cwd) but the runtime uses `__dirname` which now resolves to `src/server/`.
+- `src/client/index.html`:
+  - Already references `src/main.jsx` — update to `./main.jsx` (it's now a sibling).
+- `src/client/vite.config.js`:
+  - Add `build: { outDir: '../../dist' }`.
+  - The `inlineMainCss` and `brotliPrecompress` plugins keep their logic — `closeBundle` walks `dist/` from the same working dir.
+- `src/server/__tests__/planner.test.js`:
+  - Update import path from `'./notification-planner.js'` to `'../notifications/planner.js'`.
+
+**1.4 — Verification:**
+1. `npm install` (root) — succeeds, no peer-dep warnings.
+2. `npm test` (root) — runs planner tests (`vitest run` inside server workspace).
+3. `npm run build` (root) — emits `dist/` at repo root.
+4. `systemctl --user restart tesla-sweeper.service` — service starts clean.
+5. `curl localhost:20040/healthz` — 200 with the expected JSON shape.
+6. Browse `claw.bitvox.me/sweeper/` — page renders, map loads, OAuth start works.
+
+**1.5 — Systemd unit update (deployment-only, lives in CLAUDE.local.md):**
+The systemd `ExecStart` changes from `/usr/bin/node server.js` to `/usr/bin/npm run start --prefix /home/ec2-user/projects/tesla-sweeper` (or simpler: `/usr/bin/node src/server/index.js`). `WorkingDirectory` stays at the repo root.
+
+If anything in 1.4 fails, revert and re-plan the failing piece. Don't proceed to phase 2 until 1.4 is green.
 
 ### Phase 2 — Server decomposition
 
@@ -150,7 +259,7 @@ Subphases (each = one commit):
 
 ### Phase 3 — Server tests
 
-- **3a** Add `supertest` + dev dep. `vitest` already present.
+- **3a** Add `supertest` to `src/server/package.json` devDeps. `vitest` already declared in 1.2.
 - **3b** `store.test.js` — atomic write, corruption-aside, patchSub re-read pattern.
 - **3c** `crypto.test.js` — HMAC sign/verify happy + tampered + expired + missing-key.
 - **3d** `sweep/check.test.js` — mock `nominatim.js` + `recollect.js` + `overpass.js` modules; assert end-to-end output shape and message templates for each sweep-status branch.
@@ -173,7 +282,7 @@ Subphases (each = one commit, build + visual smoke test):
 
 ### Phase 5 — Client tests
 
-- **5a** Set up `happy-dom` environment for vitest (`@vitest/browser` is overkill; `happy-dom` is fine for these components).
+- **5a** Add `happy-dom` to `src/client/package.json` devDeps. Author `src/client/vitest.config.js` (or `test` block in `vite.config.js`) with `environment: 'happy-dom'` so JSX/DOM tests resolve.
 - **5b** `lib/cache.test.js` — versioning, expiry, malformed JSON.
 - **5c** `lib/slack-input.test.js` — parses `<@U…|name>` markup, raw `U…`, mention-text, fallback.
 - **5d** `MapView.test.jsx` — renders given coords, popup label appears, draggable mode wires onPinMove.
@@ -199,24 +308,26 @@ Subphases (each = one commit, build + visual smoke test):
 ## Risks / out-of-scope
 
 - **CSS split** is explicitly out of scope. `App.css` stays whole at first; per-component CSS modules can come later if a component grows large enough to need them.
-- **Build pipeline changes**: `vite.config.js` may need a `root` adjustment if Vite's default index resolution gets confused by the moved entry. Will validate in Phase 1.
-- **Runtime imports**: The brotli middleware reads `dist/<path>.br`; if `dist/` layout changes (it shouldn't — Vite still emits there), the middleware breaks. Verified in Phase 1 checkpoint.
-- **Subscription store path**: `data/subscriptions.json` is referenced as a literal path relative to the working directory. Server entry now lives at `src/server/index.js` but `process.cwd()` should still be the repo root — confirmed in Phase 1.
+- **Build pipeline changes**: with `index.html` + `vite.config.js` now under `src/client/`, Vite's `root` becomes `src/client/`. `build.outDir: '../../dist'` keeps the artifact at the repo root so the server's brotli middleware path doesn't change. Validated in Phase 1.4.
+- **`__dirname` paths**: server modules currently use `dirname(fileURLToPath(import.meta.url))` for `data/` and `dist/`. After the move, `__dirname = src/server/`, so they need a `../..` prefix. Phase 1.3 patches them; missing one would silently write/read state to the wrong place.
+- **`process.cwd()` vs `__dirname`**: when `npm run start -w @tesla-sweeper/server` is invoked, npm sets cwd to `src/server/`. Anything that read `./data/...` (cwd-relative) would now look in `src/server/data/`. Audit during 1.3 — current code uses `__dirname`, so we're safe, but a future add could regress. Document the convention in CLAUDE.md.
+- **Workspace install gotchas**: the first `npm install` after wiring workspaces re-resolves the entire dep tree against the new manifests. Compatible deps hoist to root `node_modules/`; incompatible ones live in the workspace's `node_modules/`. Lockfile is regenerated. Acceptable for a single-developer repo; no point preserving the old lockfile.
 - **Symlink trickery**: tempting but rejected. The repo restructure is the point; no compatibility shims at the old paths.
 - **Stub vehicle test plan** + **notification scenarios doc** stay in `docs/` and don't move.
 - **Nothing in `data/`, `dist/`, `keys/`, `node_modules/` moves.**
 - **Live state migration**: none required. The on-disk `data/subscriptions.json` schema is unchanged.
+- **Systemd unit**: `ExecStart` and `WorkingDirectory` need a one-line update — captured in CLAUDE.local.md as part of phase 1 deployment notes.
 
 ## Net diff estimate
 
-- Phase 1: ~5 file moves, ~10 lines of import-path edits. One commit.
+- Phase 1: ~9 file moves + 3 new package.json files + lockfile regen + ~20 lines of path edits. One commit (or two — workspace setup as a follow-up if the move commit is already large).
 - Phase 2: ~11 commits, ~1100 lines of `server.js` redistributed (no code changes besides moves + import wiring). New per-module overhead ~50 lines (export statements, file headers).
 - Phase 3: ~6 new test files, ~400-600 lines of test code total.
 - Phase 4: ~7 commits, ~850 lines of `App.jsx` redistributed. Same new-file overhead ~30 lines.
 - Phase 5: ~6 new test files, ~300-400 lines.
 - Phase 6: docs touch-ups, ~50 lines net.
 
-Total: ~24 commits, additive surface ~1500 lines (mostly tests).
+Total: ~24-25 commits, additive surface ~1500 lines (mostly tests). Lockfile diff is large but ephemeral (regen artifact).
 
 ## Suggested execution cadence
 
