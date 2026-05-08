@@ -1,12 +1,14 @@
 import express from 'express';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { randomBytes, timingSafeEqual, createHmac } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
 import cron from 'node-cron';
 import { classifyWeek, shouldDispatchPlan, formatPlanDM, formatWeeklyDigest } from './notifications/planner.js';
 import { wrap } from './middleware/errors.js';
 import { brotliMiddleware } from './middleware/brotli.js';
+import { signSession, verifySession } from './crypto/session.js';
+import { bearerOk } from './crypto/bearer.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Repo-root-relative paths anchor on this file's location after the
@@ -31,42 +33,6 @@ const SLACK_CLIENT_ID = process.env.SLACK_CLIENT_ID || '';
 const SLACK_CLIENT_SECRET = process.env.SLACK_CLIENT_SECRET || '';
 const SLACK_REDIRECT_URI = process.env.SLACK_REDIRECT_URI || '';
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || '';
-
-// HMAC key for short-lived session tokens issued after a verified
-// Slack OIDC callback. Without one, every restart invalidates active
-// sessions. Generate with `openssl rand -hex 32` and put in .env.
-const SESSION_HMAC_KEY = process.env.SESSION_HMAC_KEY || '';
-if (!SESSION_HMAC_KEY) console.warn('[boot] SESSION_HMAC_KEY unset — slack→/enable session gate disabled, /enable will reject every request');
-const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min
-
-// Sign a "this requester just proved ownership of slack_user_id"
-// claim. Format: "${slack_user_id}.${exp_ms}.${hmac_b64u}". Stateless;
-// /enable + /disable verify it before persisting anything.
-function signSession(slackUserId) {
-  if (!SESSION_HMAC_KEY) return '';
-  const exp = Date.now() + SESSION_TTL_MS;
-  const payload = `${slackUserId}.${exp}`;
-  const mac = createHmac('sha256', SESSION_HMAC_KEY).update(payload).digest('base64url');
-  return `${payload}.${mac}`;
-}
-
-function verifySession(token, slackUserId) {
-  if (!SESSION_HMAC_KEY || !token || typeof token !== 'string') return false;
-  const parts = token.split('.');
-  if (parts.length !== 3) return false;
-  const [user, exp, mac] = parts;
-  if (user !== slackUserId) return false;
-  const expNum = parseInt(exp, 10);
-  if (!Number.isFinite(expNum) || expNum < Date.now()) return false;
-  const expected = createHmac('sha256', SESSION_HMAC_KEY).update(`${user}.${exp}`).digest('base64url');
-  // Decode both base64url MACs to their 32-byte form before comparing.
-  // utf8 string compare also works (deterministic encoding) but the
-  // decoded form is canonical and ~25% fewer bytes through the timing
-  // primitive.
-  const a = Buffer.from(mac, 'base64url'), b = Buffer.from(expected, 'base64url');
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
-}
 
 const TESLA_BASE = 'https://fleet-api.prd.na.vn.cloud.tesla.com';
 const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
@@ -765,16 +731,6 @@ app.get('/api/notifications/status', (req, res) => {
   if (!slack_user_id) return res.status(400).json({ detail: 'slack_user_id required' });
   res.json({ subscriptions: loadSubs().filter(s => s.slack_user_id === slack_user_id).map(publicSub) });
 });
-
-function bearerOk(authHeader, token) {
-  if (!token) return false;
-  const givenBuf = Buffer.from(authHeader);
-  const expectedBuf = Buffer.from(`Bearer ${token}`);
-  // timingSafeEqual throws on mismatched byte length, so gate on
-  // byte-length first (.length on a string is char count, not bytes).
-  if (givenBuf.length !== expectedBuf.length) return false;
-  return timingSafeEqual(givenBuf, expectedBuf);
-}
 
 // Build the per-sub plan (class + windowEvents + primaryEvent) using
 // the same classifier the message formatters consume. Returns null
