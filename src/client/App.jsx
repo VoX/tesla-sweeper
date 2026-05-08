@@ -37,6 +37,17 @@ export default function App() {
   const [selectedVehicle, setSelectedVehicle] = useState(() => localStorage.getItem('tesla_selected_vehicle') || null);
   const [mapPos, setMapPos] = useState(null);
   const [oauthStatus, setOauthStatus] = useState('');
+  // Transient toast layered over oauthStatus so the 60s tick effect
+  // can keep refreshing the steady-state connection string without
+  // wiping action toasts ("token refreshed", "slack pings enabled").
+  // Auto-clears after 5s.
+  const [transientToast, setTransientToast] = useState('');
+  const toastTimerRef = useRef(null);
+  const showToast = useCallback((msg) => {
+    clearTimeout(toastTimerRef.current);
+    setTransientToast(msg);
+    toastTimerRef.current = setTimeout(() => setTransientToast(''), 5000);
+  }, []);
   const [tokens, setTokens] = useState(() => {
     try {
       const saved = localStorage.getItem('tesla_tokens');
@@ -172,7 +183,7 @@ export default function App() {
         : data.test_dm_error
           ? ` — couldn't send test DM (${data.test_dm_error}), sub still active`
           : '';
-      setOauthStatus(`\u{1F514} Daily slack pings enabled for ${veh?.name || 'this vehicle'}${dmHint}`);
+      showToast(`\u{1F514} Daily slack pings enabled for ${veh?.name || 'this vehicle'}${dmHint}`);
     } catch (e) {
       setNotifError(e.message);
     } finally {
@@ -212,10 +223,10 @@ export default function App() {
           expires_at: Date.now() + data.expires_in * 1000,
         };
         setTokens(newTokens);
-        setOauthStatus('\u2705 Token refreshed');
+        showToast('\u2705 Token refreshed');
         return data.access_token;
       } catch (e) {
-        setOauthStatus('\u274C Refresh failed: ' + e.message);
+        showToast('\u274C Refresh failed: ' + e.message);
         setTokens(null);
         return false;
       } finally {
@@ -318,6 +329,17 @@ export default function App() {
     }
   };
 
+  // 300ms trailing debounce so a flurry of drag-releases (drag, drop,
+  // re-drag) collapses into one server round-trip. AbortController
+  // already cancels in-flight requests; this just stops us from
+  // queueing them in the first place. Auto-probe on tab switch
+  // (line below the useCallback) bypasses the debounce on purpose.
+  const pinDebounceRef = useRef(null);
+  const debouncedPinMove = useCallback((lat, lng) => {
+    clearTimeout(pinDebounceRef.current);
+    pinDebounceRef.current = setTimeout(() => handleManualPinMove(lat, lng), 300);
+  }, []);
+
   // Manual-tab pin handler. Reverse-geocodes to get a street name for
   // the Recollect lookup, then calls /api/sweep-check with coords —
   // sweep result + side_detection come back in one round trip.
@@ -417,7 +439,7 @@ export default function App() {
       sessionStorage.removeItem('slack_oauth_state');
       setOauthStatus('Exchanging slack code for identity...');
       setNotifLoading(true);
-      post('slack/oauth/callback', { code })
+      post('slack/oauth/callback', { code, state })
         .then(data => {
           if (!data.slack_user_id) throw new Error('Slack returned no user_id');
           setSlackUserId(data.slack_user_id);
@@ -427,11 +449,11 @@ export default function App() {
           // the page longer than that before subscribing.
           if (data.session) sessionStorage.setItem('slack_session', data.session);
           setNotifError('');
-          setOauthStatus(`\u{1F510} Signed in as ${data.name || data.slack_user_id} — click Enable Daily Notifications to subscribe.`);
+          showToast(`\u{1F510} Signed in as ${data.name || data.slack_user_id} — click Enable Daily Notifications to subscribe.`);
         })
         .catch(e => {
           setNotifError('Slack sign-in failed: ' + e.message);
-          setOauthStatus('❌ Slack sign-in failed: ' + e.message);
+          showToast('❌ Slack sign-in failed: ' + e.message);
         })
         .finally(() => setNotifLoading(false));
       return;
@@ -445,7 +467,7 @@ export default function App() {
     setOauthStatus('Exchanging code for token...');
     setLoading(true);
 
-    post('oauth/app/callback', { code })
+    post('oauth/app/callback', { code, state })
       .then(async (data) => {
         setTokens({ access_token: data.access_token, refresh_token: data.refresh_token, expires_at: Date.now() + data.expires_in * 1000 });
         setOauthStatus('\u2705 Connected! Loading vehicles...');
@@ -499,7 +521,7 @@ export default function App() {
         <div role="tabpanel">
           {tokens ? (
             <>
-              <div className="oauth-status">{oauthStatus || '\u2705 Connected'}</div>
+              <div className="oauth-status">{transientToast || oauthStatus || '\u2705 Connected'}</div>
               {vehicles?.length === 0 && (
                 <p style={{fontSize: '0.85rem', color: '#8b949e', marginBottom: 16}}>No vehicles registered on this Tesla account. Add a vehicle in the Tesla app and try again.</p>
               )}
@@ -534,7 +556,7 @@ export default function App() {
             <>
               <p style={{fontSize: '0.85rem', color: '#8b949e', marginBottom: 16}}>Sign in with your Tesla account to locate your car and check the sweeping schedule.</p>
               <button onClick={connectTesla} disabled={loading}>{loading ? 'Connecting...' : 'Connect Tesla Account'}</button>
-              {oauthStatus && <div className="oauth-status">{oauthStatus}</div>}
+              {(transientToast || oauthStatus) && <div className="oauth-status">{transientToast || oauthStatus}</div>}
             </>
           )}
         </div>
@@ -555,7 +577,7 @@ export default function App() {
             pos={manualPos}
             data={manualSweepData}
             draggable
-            onPinMove={handleManualPinMove}
+            onPinMove={debouncedPinMove}
             popupLabel="Pin location"
           />
         </div>

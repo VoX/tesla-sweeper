@@ -1,6 +1,8 @@
 // Lazy-load leaflet so the 152 KB chunk only ships when the user
 // actually renders a map (sweep result or test-side panel). Cached
 // after first load — subsequent calls return the resolved promise.
+// Reset on rejection so a transient chunk-404 doesn't stick a
+// permanent failure in the cache; the next mount can retry.
 let leafletPromise = null;
 
 export function loadLeaflet() {
@@ -30,5 +32,6 @@ export function loadLeaflet() {
     });
     return L;
   })();
+  leafletPromise.catch(() => { leafletPromise = null; });
   return leafletPromise;
 }

@@ -2,7 +2,7 @@
 // never logged). Atomic write via temp+rename; corrupt files moved
 // aside instead of silently nuked.
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
+import { readFileSync, openSync, writeSync, fsyncSync, closeSync, renameSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -30,8 +30,18 @@ export function loadStore() {
 }
 
 export function saveStore(store) {
+  // open+write+fsync+close THEN rename so a power-loss between the
+  // tmp write and the rename can't leave a zero-byte subscriptions.json
+  // (which loadStore would treat as corrupt and move aside, dropping
+  // every active sub on the floor).
   const tmp = SUBS_FILE + '.tmp';
-  writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 });
+  const fd = openSync(tmp, 'w', 0o600);
+  try {
+    writeSync(fd, JSON.stringify(store, null, 2));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   renameSync(tmp, SUBS_FILE);
 }
 

@@ -12,13 +12,14 @@ export function MapView({ lat, lng, street, segment, draggable, onPinMove, popup
   const overlaysRef = useRef([]);
   const onPinMoveRef = useRef(onPinMove);
   const [L, setL] = useState(null);
+  const [loadError, setLoadError] = useState(null);
 
   // Keep latest dragend handler in a ref so the marker's listener
   // (attached once at map init) always calls the current closure.
   useEffect(() => { onPinMoveRef.current = onPinMove; }, [onPinMove]);
 
   useEffect(() => {
-    if (lat != null) loadLeaflet().then(setL);
+    if (lat != null) loadLeaflet().then(setL).catch(e => setLoadError(e.message || 'Map failed to load'));
   }, [lat]);
 
   useEffect(() => () => {
@@ -65,5 +66,12 @@ export function MapView({ lat, lng, street, segment, draggable, onPinMove, popup
   }, [L, segment, lat, lng]);
 
   if (lat == null) return null;
+  if (loadError) {
+    return (
+      <div className="map-container" role="alert" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8b949e', fontSize: '0.85rem', textAlign: 'center', padding: 16 }}>
+        Map couldn't load ({loadError}). Refresh to retry.
+      </div>
+    );
+  }
   return <div ref={mapRef} className="map-container" aria-label="Location map" role="img" />;
 }
