@@ -4,13 +4,17 @@ import { dirname, join, extname } from 'path';
 import { randomBytes, timingSafeEqual, createHmac } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, mkdirSync, statSync } from 'fs';
 import cron from 'node-cron';
-import { classifyWeek, shouldDispatchPlan, formatPlanDM, formatWeeklyDigest } from './lib/notification-planner.js';
+import { classifyWeek, shouldDispatchPlan, formatPlanDM, formatWeeklyDigest } from './notifications/planner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+// Repo-root-relative paths anchor on this file's location after the
+// src/server/index.js move. Every `data/`, `dist/`, and `.env` reference
+// goes through here so a move never silently drifts to a wrong path.
+const REPO_ROOT = join(__dirname, '..', '..');
 
 // Load .env
 try {
-  for (const line of readFileSync(join(__dirname, '.env'), 'utf8').split('\n')) {
+  for (const line of readFileSync(join(REPO_ROOT, '.env'), 'utf8').split('\n')) {
     const m = line.match(/^(\w+)=(.*)$/);
     if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
   }
@@ -108,7 +112,7 @@ const TESLA_TOKEN_URL = 'https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/tok
 // Subscriptions for daily sweep notifications. File holds Tesla
 // refresh_tokens — mode 0600, never logged. Atomic write via temp+rename
 // so a crash mid-write doesn't truncate the store.
-const SUBS_DIR = join(__dirname, 'data');
+const SUBS_DIR = join(REPO_ROOT, 'data');
 const SUBS_FILE = join(SUBS_DIR, 'subscriptions.json');
 const NOTIFICATIONS_RUN_TOKEN = process.env.NOTIFICATIONS_RUN_TOKEN || '';
 const STUCK_FAIL_THRESHOLD = 3;
@@ -980,13 +984,13 @@ app.use((req, res, next) => {
   if (req.method !== 'GET' && req.method !== 'HEAD') return next();
   const type = BR_TYPES[extname(req.path).toLowerCase()];
   if (!type || !(req.headers['accept-encoding'] || '').includes('br')) return next();
-  const brPath = join(__dirname, 'dist', req.path) + '.br';
+  const brPath = join(REPO_ROOT, 'dist', req.path) + '.br';
   try { statSync(brPath); } catch { return next(); }
   res.set({ 'Content-Encoding': 'br', 'Vary': 'Accept-Encoding', 'Content-Type': `${type}; charset=utf-8` });
   res.sendFile(brPath);
 });
-app.use(express.static(join(__dirname, 'dist')));
-app.get('*', (req, res) => res.sendFile(join(__dirname, 'dist', 'index.html')));
+app.use(express.static(join(REPO_ROOT, 'dist')));
+app.get('*', (req, res) => res.sendFile(join(REPO_ROOT, 'dist', 'index.html')));
 
 // Exit on uncaught exceptions — continuing leaves the process in
 // undefined state (mid-write file handles, half-rotated tokens).

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   classifyWeek, shouldDispatchPlan, formatPlanDM, formatWeeklyDigest, daysBetween,
-} from './notification-planner.js';
+} from '../notifications/planner.js';
 
 const TIME = '8:00 AM - 12:00 PM';
 const TODAY = '2026-05-11'; // Monday
