@@ -16,6 +16,7 @@ import {
   teslaTokenExchange, fetchVehicleData, TESLA_BASE, UA, FETCH_TIMEOUT,
 } from './integrations/tesla.js';
 import { postSlackDM } from './integrations/slack.js';
+import { reverseGeocodeLocation, nominatimFetch } from './integrations/nominatim.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Repo-root-relative paths anchor on this file's location after the
@@ -39,42 +40,15 @@ const TESLA_APP_REDIRECT_URI = process.env.TESLA_REDIRECT_URI || '';
 const SLACK_CLIENT_ID = process.env.SLACK_CLIENT_ID || '';
 const SLACK_CLIENT_SECRET = process.env.SLACK_CLIENT_SECRET || '';
 const SLACK_REDIRECT_URI = process.env.SLACK_REDIRECT_URI || '';
-const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
 const RECOLLECT_BASE = 'https://api.recollect.net/api';
 const RECOLLECT_SERVICE = 349;
 const SLACK_USER_ID_RE = /^U[A-Z0-9]+$/;
-
-function fetchWithTimeout(url, options = {}) {
-  return fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), ...options });
-}
-
-// Nominatim rate limiter (1 req/sec)
-let lastNominatimCall = 0;
-async function nominatimFetch(url, options) {
-  const now = Date.now();
-  const wait = Math.max(0, 1000 - (now - lastNominatimCall));
-  if (wait > 0) await new Promise(r => setTimeout(r, wait));
-  lastNominatimCall = Date.now();
-  return fetchWithTimeout(url, options);
-}
-
 const NOTIFICATIONS_RUN_TOKEN = process.env.NOTIFICATIONS_RUN_TOKEN || '';
 const STUCK_FAIL_THRESHOLD = 3;
 const STUCK_DM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
-async function reverseGeocodeLocation(lat, lng) {
-  const params = new URLSearchParams({ format: 'jsonv2', lat, lon: lng, zoom: 18, addressdetails: 1 });
-  const res = await nominatimFetch(`${NOMINATIM_BASE}/reverse?${params}`, { headers: { 'User-Agent': UA } });
-  if (!res.ok) throw new Error(`Nominatim ${res.status}`);
-  const data = await res.json();
-  const a = data.address || {};
-  return {
-    street: a.road || '',
-    house_number: a.house_number || '',
-    city: a.city || a.town || a.village || '',
-    state: a.state || '',
-    display_name: data.display_name || '',
-  };
+function fetchWithTimeout(url, options = {}) {
+  return fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), ...options });
 }
 
 async function runSweepCheck({ address, today_date, past_noon = false, lat, lng }) {
