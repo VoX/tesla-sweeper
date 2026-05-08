@@ -4,22 +4,8 @@ import { readCachedCheck, saveCachedCheck } from './lib/cache.js';
 import { post, get } from './lib/api.js';
 import { clientToday } from './lib/date.js';
 import { parseSlackInput } from './lib/slack-input.js';
-
-function StatusBox({ status, title, message }) {
-  const icon = { danger: '\u{1F6A8}', warning: '\u26A0\uFE0F', safe: '\u2705', info: '\u2139\uFE0F' }[status] || '';
-  // Danger gets role=alert + assertive live region so screen readers
-  // interrupt; the rest get polite status updates.
-  return (
-    <div className={`status-box ${status}`} role={status === 'danger' ? 'alert' : 'status'} aria-live={status === 'danger' ? 'assertive' : 'polite'}>
-      <h2>{icon} {title}</h2>
-      <p>{message}</p>
-    </div>
-  );
-}
-
-function Row({ label, value }) {
-  return <div className="row"><span className="label">{label}</span><span>{value}</span></div>;
-}
+import { StatusBox } from './components/StatusBox.jsx';
+import { Row } from './components/Row.jsx';
 
 function MapView({ lat, lng, street, segment, draggable, onPinMove, popupLabel = 'Your Car' }) {
   const mapRef = useRef(null);
