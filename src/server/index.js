@@ -10,6 +10,12 @@ import { brotliMiddleware } from './middleware/brotli.js';
 import { signSession, verifySession } from './crypto/session.js';
 import { bearerOk } from './crypto/bearer.js';
 import { loadStore, saveStore, loadSubs, saveSubs, publicSub, patchSub } from './store/subscriptions.js';
+import {
+  STUB_VEHICLE_ENABLED, STUB_VEHICLE_ID, STUB_VEHICLE_VIN, STUB_VEHICLE_LAT, STUB_VEHICLE_LNG,
+  STUB_VEHICLE_NAME, STUB_REFRESH_TOKEN, isStubVehicle,
+  teslaTokenExchange, fetchVehicleData, TESLA_BASE, UA, FETCH_TIMEOUT,
+} from './integrations/tesla.js';
+import { postSlackDM } from './integrations/slack.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Repo-root-relative paths anchor on this file's location after the
@@ -33,29 +39,10 @@ const TESLA_APP_REDIRECT_URI = process.env.TESLA_REDIRECT_URI || '';
 const SLACK_CLIENT_ID = process.env.SLACK_CLIENT_ID || '';
 const SLACK_CLIENT_SECRET = process.env.SLACK_CLIENT_SECRET || '';
 const SLACK_REDIRECT_URI = process.env.SLACK_REDIRECT_URI || '';
-const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || '';
-
-const TESLA_BASE = 'https://fleet-api.prd.na.vn.cloud.tesla.com';
 const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
 const RECOLLECT_BASE = 'https://api.recollect.net/api';
 const RECOLLECT_SERVICE = 349;
-const UA = 'TeslaSweeper/1.0';
-const FETCH_TIMEOUT = 12000;
-const VEHICLE_DATA_QS = 'endpoints=location_data%3Bcharge_state';
 const SLACK_USER_ID_RE = /^U[A-Z0-9]+$/;
-
-// Stub test vehicle — env-flag-gated mock used when the Tesla API
-// returns no vehicles. Lets developers / VoX exercise the full app
-// flow (vehicles list → check car → enable notifications → cron DM)
-// without owning a real Tesla. See docs/stub-vehicle-plan.md.
-const STUB_VEHICLE_ENABLED = process.env.STUB_VEHICLE_ENABLED === '1';
-const STUB_VEHICLE_ID = 999999999999999;          // 15 digits — real Tesla IDs are 16
-const STUB_VEHICLE_VIN = 'STUBTEST00000000000';
-const STUB_VEHICLE_LAT = parseFloat(process.env.STUB_VEHICLE_LAT) || 42.385081;
-const STUB_VEHICLE_LNG = parseFloat(process.env.STUB_VEHICLE_LNG) || -71.107841;
-const STUB_VEHICLE_NAME = process.env.STUB_VEHICLE_NAME || 'Test Vehicle';
-const STUB_REFRESH_TOKEN = 'STUB_REFRESH_TOKEN';   // sentinel persisted in subscriptions.json; cron branches on it
-function isStubVehicle(id) { return STUB_VEHICLE_ENABLED && String(id) === String(STUB_VEHICLE_ID); }
 
 function fetchWithTimeout(url, options = {}) {
   return fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), ...options });
@@ -71,87 +58,9 @@ async function nominatimFetch(url, options) {
   return fetchWithTimeout(url, options);
 }
 
-const TESLA_TOKEN_URL = 'https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token';
-
 const NOTIFICATIONS_RUN_TOKEN = process.env.NOTIFICATIONS_RUN_TOKEN || '';
 const STUCK_FAIL_THRESHOLD = 3;
 const STUCK_DM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
-
-// Wake an asleep vehicle and poll until it reports online. Returns
-// true on success, false on timeout. Caller should retry vehicle_data
-// only after this returns true. The 60s ceiling matches typical
-// Tesla wake latency (model 3 ~30s, model s ~50s); cars deeper in
-// hibernation can take longer but the frontend's UX is degraded
-// past a minute and it's better to fail loud than block forever.
-async function teslaWakeAndPoll(headers, vid) {
-  const wakeRes = await fetchWithTimeout(`${TESLA_BASE}/api/1/vehicles/${vid}/wake_up`, {
-    method: 'POST',
-    headers,
-  });
-  if (!wakeRes.ok) {
-    console.error(`[wake] wake_up returned ${wakeRes.status}`);
-    return false;
-  }
-  for (let i = 0; i < 12; i++) {
-    await new Promise(r => setTimeout(r, 5000));
-    const stateRes = await fetchWithTimeout(`${TESLA_BASE}/api/1/vehicles/${vid}`, { headers });
-    if (!stateRes.ok) continue;
-    const v = (await stateRes.json()).response;
-    console.log(`[wake] poll ${i + 1}/12 — state=${v?.state}`);
-    if (v?.state === 'online') return true;
-  }
-  return false;
-}
-
-async function teslaTokenExchange(params) {
-  const r = await fetchWithTimeout(TESLA_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams(params).toString(),
-  });
-  if (!r.ok) {
-    const body = await r.json().catch(() => ({}));
-    // Log only the documented error fields — the full body could
-    // include the refresh_token in error responses for some grant
-    // types, and ec2-user logs are readable to anyone with shell.
-    console.error('Tesla token error:', { error: body.error, description: body.error_description });
-    throw new Error(body.error_description || body.error || 'Token exchange failed');
-  }
-  return r.json();
-}
-
-// Post a Slack DM via chat.postMessage. mrkdwn:false defangs any
-// `<...>`/`*...*` chars that slipped in from user-supplied vehicle
-// names or Nominatim address strings — DMs render plain text.
-async function postSlackDM(slack_user_id, text) {
-  if (!SLACK_BOT_TOKEN) return { ok: false, error: 'SLACK_BOT_TOKEN not configured' };
-  const res = await fetchWithTimeout('https://slack.com/api/chat.postMessage', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
-      'Content-Type': 'application/json; charset=utf-8',
-    },
-    body: JSON.stringify({ channel: slack_user_id, text, mrkdwn: false }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!data.ok) console.error('[slack-dm] postMessage failed:', data.error);
-  return { ok: !!data.ok, error: data.error };
-}
-
-// Fetch vehicle_data with location + charge_state. Wakes the car if it
-// returns 408 (asleep) and retries once. Throws on anything that
-// doesn't parse to a usable response.
-async function fetchVehicleData(headers, vid) {
-  const url = `${TESLA_BASE}/api/1/vehicles/${vid}/vehicle_data?${VEHICLE_DATA_QS}`;
-  let res = await fetchWithTimeout(url, { headers });
-  if (res.status === 408) {
-    console.log(`[wake] vehicle ${vid} asleep — sending wake_up`);
-    if (!await teslaWakeAndPoll(headers, vid)) throw new Error('Vehicle did not wake within 60s');
-    res = await fetchWithTimeout(url, { headers });
-  }
-  if (!res.ok) throw new Error(`vehicle_data ${res.status}`);
-  return res.json();
-}
 
 async function reverseGeocodeLocation(lat, lng) {
   const params = new URLSearchParams({ format: 'jsonv2', lat, lon: lng, zoom: 18, addressdetails: 1 });
