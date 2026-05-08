@@ -135,7 +135,9 @@ export function formatPlanDM({ vehicleName, address, plan }) {
       head = `:warning: Sweep on ${e.side.toUpperCase()} side ${formatDay(e.date)}. *Couldn't auto-detect your side* — open <${APP_URL}> to confirm.`;
       break;
     default:
-      head = `Sweep ${formatDay(e?.date)}.`;
+      // Surface a missing case loudly instead of DMing "Sweep ." — every
+      // class above is exhaustive and `safe` returns early up top.
+      throw new Error(`formatPlanDM: unhandled plan class '${plan.class}'`);
   }
   return `${head}\n${footer(vehicleName, address)}`;
 }
@@ -219,15 +221,13 @@ function shortTime(t) {
 }
 
 function findSameDayPair(events) {
-  const byDate = {};
+  const seen = new Map(); // date -> first odd/even event seen
   for (const e of events) {
     if (e.side !== 'odd' && e.side !== 'even') continue;
-    (byDate[e.date] ||= []).push(e);
-  }
-  for (const list of Object.values(byDate)) {
-    const sides = new Set(list.map(e => e.side));
-    if (sides.size >= 2) {
-      return { evenE: list.find(e => e.side === 'even'), oddE: list.find(e => e.side === 'odd') };
+    const prev = seen.get(e.date);
+    if (!prev) { seen.set(e.date, e); continue; }
+    if (prev.side !== e.side) {
+      return { evenE: prev.side === 'even' ? prev : e, oddE: prev.side === 'odd' ? prev : e };
     }
   }
   return null;

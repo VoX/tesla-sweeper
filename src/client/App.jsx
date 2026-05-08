@@ -70,6 +70,14 @@ export default function App() {
 
   const autoCheckedRef = useRef(false);
 
+  // Geo response → "{house_number} {street}" with empty parts dropped.
+  // Both the Tesla and manual flows hit /reverse-geocode and need the
+  // same formatted address for /sweep-check.
+  const addrFromGeo = (geo) => [geo.house_number, geo.street].filter(Boolean).join(' ');
+  // Slack session token (HMAC paired with slack_user_id) used to prove
+  // ownership on /enable + /disable; empty string when not signed in.
+  const slackSession = () => sessionStorage.getItem('slack_session') || '';
+
   useEffect(() => {
     if (tokens) {
       localStorage.setItem('tesla_tokens', JSON.stringify(tokens));
@@ -155,7 +163,7 @@ export default function App() {
         vehicle_id: vid,
         vehicle_name: veh?.name || 'Unknown',
         slack_user_id: slackUserId,
-        session: sessionStorage.getItem('slack_session') || '',
+        session: slackSession(),
       });
       await fetchSubscriptions(slackUserId);
       setNotifError('');
@@ -176,7 +184,7 @@ export default function App() {
     setNotifLoading(true);
     setNotifError('');
     try {
-      await post('notifications/disable', { id: subId, slack_user_id: slackUserId, session: sessionStorage.getItem('slack_session') || '' });
+      await post('notifications/disable', { id: subId, slack_user_id: slackUserId, session: slackSession() });
       await fetchSubscriptions(slackUserId);
     } catch (e) {
       setNotifError(e.message);
@@ -293,7 +301,7 @@ export default function App() {
     setMapPos(mapPosVal);
     setVehicleInfo(vehicleInfoVal);
 
-    const addr = [geo.house_number, geo.street].filter(Boolean).join(' ');
+    const addr = addrFromGeo(geo);
     if (!addr) {
       const fallback = { found: true, status: 'info', title: 'Location Found', message: `Car at ${vehicle.latitude.toFixed(5)}, ${vehicle.longitude.toFixed(5)} but couldn't determine street.`, sweep_events: [] };
       setSweepData(fallback);
@@ -321,7 +329,7 @@ export default function App() {
     setManualLoading(true);
     try {
       const geo = await post('reverse-geocode', { lat, lng }, ctrl.signal);
-      const addr = [geo.house_number, geo.street].filter(Boolean).join(' ') || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      const addr = addrFromGeo(geo) || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
       if (!ctrl.signal.aborted) setManualPos({ lat, lng, street: geo.street || 'Unknown' });
       const data = await post('sweep-check', {
         address: addr, today_date: clientToday(), past_noon: new Date().getHours() >= 12, lat, lng,
@@ -500,7 +508,7 @@ export default function App() {
                   <label>Select Vehicle</label>
                   <select value={selectedVehicle || ''} onChange={e => setSelectedVehicle(e.target.value)} style={{width: '100%', padding: '10px 12px', background: '#161b22', border: '1px solid #30363d', borderRadius: 6, color: '#c9d1d9', fontSize: '0.9rem'}}>
                     <option value="" disabled>Choose a vehicle...</option>
-                    {vehicles.map(v => <option key={v.id} value={v.id}>{v.name}{v.id === 999999999999999 ? ' (test)' : ''} ({v.state})</option>)}
+                    {vehicles.map(v => <option key={v.id} value={v.id}>{v.name}{v.is_stub ? ' (test)' : ''} ({v.state})</option>)}
                   </select>
                 </div>
               )}

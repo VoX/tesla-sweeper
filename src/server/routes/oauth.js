@@ -75,18 +75,25 @@ oauthRouter.post('/api/slack/oauth/callback', wrap(async (req, res) => {
   const data = await tokenRes.json();
   if (!data.ok) throw new Error(data.error || 'Slack token exchange failed');
   if (!data.id_token) throw new Error('Slack returned no id_token');
-  // Decode the id_token JWT instead of a second userInfo round-trip.
-  // Slack signed it and we got it over TLS in the same exchange, so
-  // signature verification adds no security at this seam.
+  // Decode the id_token JWT. We trust the signature implicitly because
+  // we got it directly from Slack over TLS in this same exchange — but
+  // we still verify iss/aud/exp on the claims as defense-in-depth, so
+  // a Slack response shape regression or upstream proxy that injects a
+  // foreign id_token can't mint a session for an attacker's user_id.
   const claims = JSON.parse(Buffer.from(data.id_token.split('.')[1], 'base64url').toString());
+  if (claims.iss !== 'https://slack.com') throw new Error('Slack id_token: bad iss');
+  if (claims.aud !== SLACK_CLIENT_ID) throw new Error('Slack id_token: bad aud');
+  if (typeof claims.exp !== 'number' || claims.exp * 1000 < Date.now()) throw new Error('Slack id_token: expired');
+  const slackUserId = claims['https://slack.com/user_id'];
+  if (!slackUserId) throw new Error('Slack id_token: missing user_id');
   res.json({
-    slack_user_id: claims['https://slack.com/user_id'],
+    slack_user_id: slackUserId,
     team_id: claims['https://slack.com/team_id'],
     email: claims.email,
     name: claims.name,
     // Short-lived HMAC token tied to the verified slack_user_id —
     // SPA passes it on subsequent /enable + /disable calls so the
     // server can prove the requester actually owns the slack id.
-    session: signSession(claims['https://slack.com/user_id']),
+    session: signSession(slackUserId),
   });
 }));

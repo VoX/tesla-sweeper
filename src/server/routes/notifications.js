@@ -64,7 +64,7 @@ notificationsRouter.post('/api/notifications/enable', wrap(async (req, res) => {
   const sub = {
     id: randomBytes(8).toString('hex'),
     slack_user_id,
-    vehicle_id,
+    vehicle_id: String(vehicle_id),
     vehicle_name: vehicle_name || 'Unknown',
     refresh_token: storedRefreshToken,
     created_at: new Date().toISOString(),

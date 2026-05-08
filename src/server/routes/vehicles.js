@@ -40,7 +40,7 @@ vehiclesRouter.post('/api/vehicles', wrap(async (req, res) => {
   const out = vehicles.map(v => ({ id: String(v.id), name: v.display_name || 'Unknown', vin: v.vin, state: v.state }));
   if (STUB_VEHICLE_ENABLED && out.length === 0) {
     console.log('[vehicles] injecting stub test vehicle');
-    out.push({ id: String(STUB_VEHICLE_ID), name: STUB_VEHICLE_NAME, vin: STUB_VEHICLE_VIN, state: 'online' });
+    out.push({ id: String(STUB_VEHICLE_ID), name: STUB_VEHICLE_NAME, vin: STUB_VEHICLE_VIN, state: 'online', is_stub: true });
   }
   res.json({ vehicles: out });
 }));

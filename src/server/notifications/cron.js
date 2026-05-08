@@ -79,8 +79,10 @@ export async function runNotifications({ mode = 'daily' } = {}) {
         // reverse-geocode often returns the closest building (which can
         // be on the opposite curb, especially for oversized lots) and
         // we don't want the DM to name a house that isn't the user's.
+        // `!= null && !== ''` instead of truthy — house number 0 is rare
+        // but real (some commercial lots), and OSM data does include it.
         const carHouseNum = sweep.side_detection?.car_house_number;
-        if (carHouseNum && geo.street) {
+        if (carHouseNum != null && carHouseNum !== '' && geo.street) {
           out.address = geo.city ? `${carHouseNum} ${geo.street}, ${geo.city}` : `${carHouseNum} ${geo.street}`;
         }
         out.ok = true;

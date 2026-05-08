@@ -45,10 +45,15 @@ export function publicSub(s) {
 
 // Re-loads the store so concurrent /enable or /disable during a cron
 // run isn't clobbered. Drops the patch if the sub was disabled mid-run.
+// Logs a warning so a rotated-then-lost refresh_token (user disabled
+// between rotation and patch) is at least visible in the journal.
 export function patchSub(subId, patch) {
   const store = loadStore();
   const sub = (store.subscriptions || []).find(s => s.id === subId);
-  if (!sub) return;
+  if (!sub) {
+    console.warn(`[store] patchSub: sub ${subId} not found (disabled mid-cron?), patch dropped: ${Object.keys(patch).join(',')}`);
+    return;
+  }
   Object.assign(sub, patch);
   saveStore(store);
 }
