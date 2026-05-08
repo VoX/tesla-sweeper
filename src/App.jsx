@@ -499,7 +499,7 @@ export default function App() {
 
   useEffect(() => {
     if (!tokens) return;
-    const interval = setInterval(() => {
+    const check = () => {
       const remaining = Math.max(0, tokens.expires_at - Date.now());
       const mins = Math.floor(remaining / 60000);
       const hrs = Math.floor(mins / 60);
@@ -511,12 +511,31 @@ export default function App() {
       } else {
         setOauthStatus(`\u2705 Connected — token expires in ${mins}m`);
       }
-    }, 60000);
+    };
+    // Eager run so an already-expired token on mount kicks off a
+    // refresh immediately instead of waiting up to 60s for the first
+    // setInterval tick.
+    check();
+    const interval = setInterval(check, 60000);
     return () => clearInterval(interval);
   }, [tokens, refreshToken]);
 
   const fetchVehicles = async (accessToken) => {
-    const data = await post('vehicles', { token: accessToken });
+    let data;
+    try {
+      data = await post('vehicles', { token: accessToken });
+    } catch (e) {
+      // Match checkVehicle's pattern: a 401 on a stale-load means the
+      // token expired since last visit; refresh + retry once before
+      // bubbling up. Without this, the page sat on a failed /vehicles
+      // until the 60s setInterval polling tick eventually triggered
+      // the refresh on its own.
+      if (e.message.includes('401') && tokens?.refresh_token) {
+        const newToken = await refreshToken();
+        if (newToken) data = await post('vehicles', { token: newToken });
+        else throw e;
+      } else throw e;
+    }
     setVehicles(data.vehicles);
     if (data.vehicles.length === 1) setSelectedVehicle(data.vehicles[0].id);
     // Drop a stale selectedVehicle if the new list doesn't contain it —
