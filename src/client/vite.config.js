@@ -79,4 +79,7 @@ export default defineConfig({
     outDir: DIST_DIR,
     emptyOutDir: true,
   },
+  test: {
+    environment: 'happy-dom',
+  },
 });
