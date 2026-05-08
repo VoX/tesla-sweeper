@@ -2,7 +2,9 @@
 // route module that talks to a third-party API uses this so we don't
 // hang a worker on a slow Tesla/Slack/OSM round-trip.
 
-export const UA = 'TeslaSweeper/1.0';
+// Per OSM Nominatim policy: User-Agent must identify the app + provide
+// a contact URL so the maintainers can reach us on abuse.
+export const UA = 'TeslaSweeper/1.0 (+https://claw.bitvox.me/sweeper/)';
 export const FETCH_TIMEOUT = 12000;
 
 export const fetchWithTimeout = (url, options = {}) =>
