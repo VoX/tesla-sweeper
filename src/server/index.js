@@ -1,10 +1,8 @@
-// Tesla Sweeper service entry. Builds the express app, registers the
-// notification cron, listens, and fires both missed-run recovery
-// helpers in case the box was down across a scheduled fire time.
+// Tesla Sweeper service entry. Builds app, starts cron, fires
+// missed-run recovery helpers.
 
-// MUST be the first import — config.js loads .env into process.env so
-// transitively-imported integration modules (which read env at module
-// eval time) see the values. Reordering this line breaks the boot.
+// MUST be first — config.js loads .env so integration modules (which
+// read process.env at module-eval time) see values. Don't reorder.
 import './config.js';
 import { buildApp } from './app.js';
 import {

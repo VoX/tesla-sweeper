@@ -1,13 +1,8 @@
-// Nominatim (OSM reverse geocoding) — rate-limited 1 req/sec per the
-// public usage policy. Used by the cron + the Manual-tab probe path.
+// Nominatim (OSM reverse geocoding) — rate-limited 1 req/sec per usage policy.
+
+import { fetchWithTimeout, UA } from '../util/fetch.js';
 
 const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
-const UA = 'TeslaSweeper/1.0';
-const FETCH_TIMEOUT = 12000;
-
-function fetchWithTimeout(url, options = {}) {
-  return fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), ...options });
-}
 
 let lastCall = 0;
 export async function nominatimFetch(url, options) {

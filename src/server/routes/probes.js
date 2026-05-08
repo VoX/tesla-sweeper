@@ -1,5 +1,4 @@
-// Public probe endpoints + healthz. Side-detection + sweep-check + the
-// liveness/ops endpoint that operators curl to see if the cron is alive.
+// Public probe endpoints + healthz (side-detection, sweep-check, liveness).
 
 import { Router } from 'express';
 import { wrap } from '../middleware/errors.js';

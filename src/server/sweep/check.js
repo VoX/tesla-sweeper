@@ -1,6 +1,5 @@
-// Run a single sweep check: address → Recollect events + OSM side
-// detection → status/title/message + canonical house number. Pure
-// composition over the integration modules; no external state.
+// Single sweep check: address → Recollect events + OSM side detection
+// → status/title/message. Pure composition; no external state.
 
 import { suggestAddress, fetchSweepEvents, parseSweepFlags } from '../integrations/recollect.js';
 import { whichSide } from '../integrations/overpass.js';

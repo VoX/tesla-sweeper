@@ -1,7 +1,6 @@
-// On-disk subscription store for daily sweep notifications. Holds Tesla
-// refresh_tokens — mode 0600, never logged. Atomic write via temp+rename
-// so a crash mid-write doesn't truncate the store. Corrupt-file recovery
-// preserves the bad bytes aside instead of silently nuking subs.
+// On-disk subscription store. Holds Tesla refresh_tokens (mode 0600,
+// never logged). Atomic write via temp+rename; corrupt files moved
+// aside instead of silently nuked.
 
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
@@ -44,9 +43,8 @@ export function publicSub(s) {
     vehicle_id: s.vehicle_id, created_at: s.created_at, last_check_at: s.last_check_at };
 }
 
-// Apply a partial update to one sub by id, re-loading the store so any
-// concurrent /enable or /disable during the run is preserved. Drops the
-// patch if the sub was disabled mid-run.
+// Re-loads the store so concurrent /enable or /disable during a cron
+// run isn't clobbered. Drops the patch if the sub was disabled mid-run.
 export function patchSub(subId, patch) {
   const store = loadStore();
   const sub = (store.subscriptions || []).find(s => s.id === subId);

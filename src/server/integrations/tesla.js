@@ -1,12 +1,10 @@
-// Tesla Fleet API helpers — token exchange, vehicle wake-and-poll, and
-// the stub-vehicle config that lets developers exercise the full flow
-// without a Tesla on the account.
+// Tesla Fleet API helpers — token exchange, vehicle wake-and-poll, stub config.
+
+import { fetchWithTimeout } from '../util/fetch.js';
 
 const TESLA_BASE = 'https://fleet-api.prd.na.vn.cloud.tesla.com';
 const TESLA_TOKEN_URL = 'https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token';
 const VEHICLE_DATA_QS = 'endpoints=location_data%3Bcharge_state';
-const UA = 'TeslaSweeper/1.0';
-const FETCH_TIMEOUT = 12000;
 
 export const STUB_VEHICLE_ENABLED = process.env.STUB_VEHICLE_ENABLED === '1';
 export const STUB_VEHICLE_ID = 999999999999999;          // 15 digits — real Tesla IDs are 16
@@ -17,10 +15,6 @@ export const STUB_VEHICLE_NAME = process.env.STUB_VEHICLE_NAME || 'Test Vehicle'
 export const STUB_REFRESH_TOKEN = 'STUB_REFRESH_TOKEN';  // sentinel persisted in subscriptions.json; cron branches on it
 export function isStubVehicle(id) {
   return STUB_VEHICLE_ENABLED && String(id) === String(STUB_VEHICLE_ID);
-}
-
-function fetchWithTimeout(url, options = {}) {
-  return fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), ...options });
 }
 
 // Wake an asleep vehicle and poll until it reports online. Returns true
@@ -78,6 +72,4 @@ export async function fetchVehicleData(headers, vid) {
   return res.json();
 }
 
-// Re-export the bare API base so callers (route handlers, /api/vehicles)
-// can hit endpoints we don't wrap above.
-export { TESLA_BASE, UA, FETCH_TIMEOUT };
+export { TESLA_BASE };

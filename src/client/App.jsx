@@ -5,6 +5,11 @@ import { clientToday } from './lib/date.js';
 import { LocationResultsView } from './components/LocationResultsView.jsx';
 import { NotificationsPanel } from './components/NotificationsPanel.jsx';
 
+const TABS = [
+  { id: 'app', icon: '🚗', label: 'Tesla Login' },
+  { id: 'manual', icon: '🗺️', label: 'Manual' },
+];
+
 export default function App() {
   const [tab, setTab] = useState(() => {
     const p = new URLSearchParams(window.location.search).get('tab');
@@ -462,18 +467,13 @@ export default function App() {
       });
   }, []);
 
-  const tabs = [
-    { id: 'app', icon: '\uD83D\uDE97', label: 'Tesla Login' },
-    { id: 'manual', icon: '\uD83D\uDDFA\uFE0F', label: 'Manual' },
-  ];
-
   return (
     <div className="container">
       <h1>{'\uD83D\uDE97'} Tesla Sweeper</h1>
       <p className="subtitle">Check if your car needs to move for Somerville street sweeping</p>
 
       <div className="tabs" role="tablist">
-        {tabs.map(t => (
+        {TABS.map(t => (
           <button
             key={t.id}
             role="tab"

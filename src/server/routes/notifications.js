@@ -1,7 +1,7 @@
-// Subscription endpoints for daily sweep notifications + the manual
-// /run trigger. The HMAC session gate on /enable + /disable closes the
-// confused-deputy hole — anyone with a Tesla refresh_token would
-// otherwise be able to subscribe arbitrary slack_user_ids.
+// Subscription endpoints for daily sweep notifications + manual /run.
+// HMAC session gate on /enable + /disable closes the confused-deputy
+// hole (a Tesla refresh_token alone shouldn't let you subscribe an
+// arbitrary slack_user_id).
 
 import { Router } from 'express';
 import { randomBytes } from 'node:crypto';
@@ -15,14 +15,11 @@ import {
 } from '../integrations/tesla.js';
 import { postSlackDM } from '../integrations/slack.js';
 import { runNotifications } from '../notifications/cron.js';
+import { fetchWithTimeout } from '../util/fetch.js';
 
 const TESLA_APP_CLIENT_ID = process.env.TESLA_CLIENT_ID || '';
 const NOTIFICATIONS_RUN_TOKEN = process.env.NOTIFICATIONS_RUN_TOKEN || '';
 const SLACK_USER_ID_RE = /^U[A-Z0-9]+$/;
-const FETCH_TIMEOUT = 12000;
-
-const fetchWithTimeout = (url, options = {}) =>
-  fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), ...options });
 
 export const notificationsRouter = Router();
 

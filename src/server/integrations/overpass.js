@@ -5,12 +5,7 @@
 // map cross sign → odd/even parity. Beats houseNum%2 when a car parks
 // across from its own address.
 
-const UA = 'TeslaSweeper/1.0';
-const FETCH_TIMEOUT = 12000;
-
-function fetchWithTimeout(url, options = {}) {
-  return fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), ...options });
-}
+import { fetchWithTimeout, UA } from '../util/fetch.js';
 
 const overpass = (q) =>
   fetchWithTimeout(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(q)}`,

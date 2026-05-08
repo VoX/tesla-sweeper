@@ -1,15 +1,10 @@
 // Recollect API — Somerville street-sweeping schedule data. No auth.
-// Two endpoints in use: address-suggest (fuzzy match → place_id) and
-// events (sweep schedule for a place over a date range).
+// Two endpoints: address-suggest (fuzzy match → place_id) + events.
+
+import { fetchWithTimeout, UA } from '../util/fetch.js';
 
 const RECOLLECT_BASE = 'https://api.recollect.net/api';
 const RECOLLECT_SERVICE = 349; // Somerville
-const UA = 'TeslaSweeper/1.0';
-const FETCH_TIMEOUT = 12000;
-
-function fetchWithTimeout(url, options = {}) {
-  return fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), ...options });
-}
 
 export async function suggestAddress(address) {
   const res = await fetchWithTimeout(

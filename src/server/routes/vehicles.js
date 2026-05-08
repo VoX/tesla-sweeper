@@ -1,7 +1,6 @@
-// Routes that proxy Tesla Fleet API calls + reverse geocoding for the
-// SPA. /api/vehicles lists the connected account; /api/check fetches
-// GPS for a specific vehicle (with stub short-circuit and wake/poll
-// retry on 408); /api/reverse-geocode wraps Nominatim.
+// Tesla Fleet API + reverse-geocode proxies for the SPA.
+// /api/vehicles lists, /api/check fetches GPS (stub short-circuit +
+// wake/poll on 408), /api/reverse-geocode wraps Nominatim.
 
 import { Router } from 'express';
 import { wrap } from '../middleware/errors.js';
@@ -10,10 +9,7 @@ import {
   STUB_VEHICLE_NAME, isStubVehicle, fetchVehicleData, TESLA_BASE,
 } from '../integrations/tesla.js';
 import { reverseGeocodeLocation } from '../integrations/nominatim.js';
-
-const FETCH_TIMEOUT = 12000;
-const fetchWithTimeout = (url, options = {}) =>
-  fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), ...options });
+import { fetchWithTimeout } from '../util/fetch.js';
 
 export const vehiclesRouter = Router();
 

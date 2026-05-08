@@ -1,13 +1,13 @@
-// Tesla Fleet API OAuth2 + Slack OIDC handlers. Both keep credentials
-// server-side: the SPA only sees codes and id_tokens, never the
-// client_secret. Slack callback also mints an HMAC session token bound
-// to the verified slack_user_id (used by /enable + /disable).
+// Tesla Fleet API OAuth2 + Slack OIDC handlers. client_secret stays
+// server-side; Slack callback mints an HMAC session bound to the
+// verified slack_user_id (used by /enable + /disable).
 
 import { Router } from 'express';
 import { randomBytes } from 'node:crypto';
 import { wrap } from '../middleware/errors.js';
 import { teslaTokenExchange, TESLA_BASE } from '../integrations/tesla.js';
 import { signSession } from '../crypto/session.js';
+import { fetchWithTimeout } from '../util/fetch.js';
 
 const TESLA_APP_CLIENT_ID = process.env.TESLA_CLIENT_ID || '';
 const TESLA_APP_CLIENT_SECRET = process.env.TESLA_CLIENT_SECRET || '';
@@ -15,10 +15,6 @@ const TESLA_APP_REDIRECT_URI = process.env.TESLA_REDIRECT_URI || '';
 const SLACK_CLIENT_ID = process.env.SLACK_CLIENT_ID || '';
 const SLACK_CLIENT_SECRET = process.env.SLACK_CLIENT_SECRET || '';
 const SLACK_REDIRECT_URI = process.env.SLACK_REDIRECT_URI || '';
-const FETCH_TIMEOUT = 12000;
-
-const fetchWithTimeout = (url, options = {}) =>
-  fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), ...options });
 
 export const oauthRouter = Router();
 

@@ -1,11 +1,8 @@
 // Slack Web API helpers — `chat.postMessage` for confirmation + cron DMs.
 
-const FETCH_TIMEOUT = 12000;
-const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || '';
+import { fetchWithTimeout } from '../util/fetch.js';
 
-function fetchWithTimeout(url, options = {}) {
-  return fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), ...options });
-}
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || '';
 
 // Post a Slack DM via chat.postMessage. mrkdwn:false defangs any
 // `<...>`/`*...*` chars that slipped in from user-supplied vehicle

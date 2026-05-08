@@ -1,8 +1,6 @@
-// Express app construction. Loads .env, mounts the json body parser +
-// route modules + the .br-aware static serving, and returns the app
-// without listening on a port. index.js calls listen() and the cron
-// scheduler; tests can import { buildApp } and exercise routes via
-// supertest without binding a port.
+// Express app construction. Mounts routes + brotli-aware static
+// serving and returns the app without listening; index.js binds the
+// port, tests use supertest against buildApp().
 
 import express from 'express';
 import { join } from 'path';

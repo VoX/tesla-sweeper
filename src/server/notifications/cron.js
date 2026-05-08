@@ -1,17 +1,7 @@
-// Daily + weekly notification cron + the runNotifications driver.
-//
-// runNotifications(mode) is the single per-sub loop that:
-//   1. Refreshes the Tesla token (or short-circuits for stub subs).
-//   2. Wakes the car if asleep, fetches GPS + battery.
-//   3. Reverse-geocodes the GPS to a Somerville address.
-//   4. Runs the sweep check (Recollect events + OSM side detection).
-//   5. Builds a per-sub plan via the classifier in planner.js.
-//   6. Dispatches a Slack DM (daily or weekly digest, depending on mode).
-//   7. Tracks consecutive_failures + a stuck-sub error DM at threshold.
-//
-// Single-flight by mode: a same-mode in-flight call returns the existing
-// Promise; a cross-mode call throws to surface the conflict in the cron
-// handler's catch.
+// Daily + weekly notification cron + runNotifications driver.
+// Per-sub: token refresh → wake/locate → geocode → sweep check →
+// plan → Slack DM. Single-flight by mode (same-mode reuses the
+// promise; cross-mode throws).
 
 import cron from 'node-cron';
 import { classifyWeek, shouldDispatchPlan, formatPlanDM, formatWeeklyDigest } from './planner.js';
@@ -27,16 +17,6 @@ import { runSweepCheck } from '../sweep/check.js';
 const TESLA_APP_CLIENT_ID = process.env.TESLA_CLIENT_ID || '';
 const STUCK_FAIL_THRESHOLD = 3;
 const STUCK_DM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
-
-function buildPlan(out, todayET) {
-  if (!out.ok || !out.found) return null;
-  return classifyWeek({
-    events: out.sweep_events || [],
-    carSide: out.car_side,
-    sideDetection: out.side_detection,
-    todayET,
-  });
-}
 
 let runningNotifications = null;
 let runningMode = null;
@@ -119,7 +99,10 @@ export async function runNotifications({ mode = 'daily' } = {}) {
       out.last_dm_error_at = sub.last_dm_error_at || null;
       out.last_dm_date = sub.last_dm_date || null;
       out.last_digest_date = sub.last_digest_date || null;
-      out.plan = buildPlan(out, todayET);
+      out.plan = (out.ok && out.found) ? classifyWeek({
+        events: out.sweep_events || [], carSide: out.car_side,
+        sideDetection: out.side_detection, todayET,
+      }) : null;
       results.push(out);
     }
 
