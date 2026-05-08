@@ -2,6 +2,10 @@
 // notification cron, listens, and fires both missed-run recovery
 // helpers in case the box was down across a scheduled fire time.
 
+// MUST be the first import — config.js loads .env into process.env so
+// transitively-imported integration modules (which read env at module
+// eval time) see the values. Reordering this line breaks the boot.
+import './config.js';
 import { buildApp } from './app.js';
 import {
   startNotificationCron, maybeRecoverMissedRun, maybeRecoverMissedDigest,

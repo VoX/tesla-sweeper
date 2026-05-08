@@ -5,29 +5,14 @@
 // supertest without binding a port.
 
 import express from 'express';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
-import { readFileSync } from 'fs';
+import { join } from 'path';
+import { REPO_ROOT_PATH as REPO_ROOT } from './config.js';
 
 import { brotliMiddleware } from './middleware/brotli.js';
 import { vehiclesRouter } from './routes/vehicles.js';
 import { probesRouter } from './routes/probes.js';
 import { oauthRouter } from './routes/oauth.js';
 import { notificationsRouter } from './routes/notifications.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-// Repo-root-relative paths — every `data/`, `dist/`, and `.env` reference
-// goes through here so a deeper module move never silently drifts.
-const REPO_ROOT = join(__dirname, '..', '..');
-
-// Load .env. Failure is silent because tests shouldn't need an .env
-// file and the variables can come from the systemd unit instead.
-try {
-  for (const line of readFileSync(join(REPO_ROOT, '.env'), 'utf8').split('\n')) {
-    const m = line.match(/^(\w+)=(.*)$/);
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
-  }
-} catch {}
 
 export function buildApp() {
   const app = express();
