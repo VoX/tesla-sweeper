@@ -7,7 +7,11 @@ const API = import.meta.env.DEV ? '/sweeper/api' : 'api';
 async function handleRes(res) {
   if (!res.ok) {
     const e = await res.json().catch(() => ({ detail: 'API error' }));
-    throw new Error(e.detail || 'API error');
+    // Attach status so callers can branch on 401 without string-matching
+    // the detail message (which the server controls and changes).
+    const err = new Error(e.detail || 'API error');
+    err.status = res.status;
+    throw err;
   }
   return res.json();
 }

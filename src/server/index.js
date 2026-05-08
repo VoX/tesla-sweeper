@@ -16,9 +16,14 @@ process.on('uncaughtException', (e) => { console.error('Uncaught:', e); process.
 process.on('unhandledRejection', (e) => console.error('Unhandled rejection:', e));
 
 const PORT = process.env.PORT || 20040;
-buildApp().listen(PORT, '127.0.0.1', () => {
+buildApp().listen(PORT, '127.0.0.1', async () => {
   console.log(`Tesla Sweeper on http://127.0.0.1:${PORT}`);
   startNotificationCron();
-  maybeRecoverMissedRun();
-  maybeRecoverMissedDigest();
+  // Sequential — runNotifications is single-flight by mode and throws
+  // on cross-mode overlap, so a Sunday-8PM-ish boot would otherwise
+  // race the daily and weekly recoveries and one would silently fail.
+  try { await maybeRecoverMissedRun(); }
+  catch (e) { console.error('[cron] missed-run recovery failed:', e); }
+  try { await maybeRecoverMissedDigest(); }
+  catch (e) { console.error('[cron] missed-digest recovery failed:', e); }
 });

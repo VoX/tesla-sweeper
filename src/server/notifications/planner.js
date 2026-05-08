@@ -53,11 +53,11 @@ export function classifyWeek({ events = [], carSide = null, sideDetection = null
   const mine = window.find(e => e.side === carSide);
   if (!mine) return { ...base, class: 'safe' };
 
-  const conflict = window.find(e =>
-    e.side === oppositeSide &&
-    daysBetween(mine.date, e.date) >= 1 &&
-    daysBetween(mine.date, e.date) <= TIGHT_FLIP_DAYS
-  );
+  const conflict = window.find(e => {
+    if (e.side !== oppositeSide) return false;
+    const gap = daysBetween(mine.date, e.date);
+    return gap >= 1 && gap <= TIGHT_FLIP_DAYS;
+  });
   if (conflict) return withPrimary(mine, { class: 'tight-flip', conflictEvent: conflict });
 
   const imminent = window.find(e => e.side === oppositeSide && e.date > todayET && e.date < mine.date);
@@ -227,7 +227,7 @@ function findSameDayPair(events) {
   for (const list of Object.values(byDate)) {
     const sides = new Set(list.map(e => e.side));
     if (sides.size >= 2) {
-      return { date: list[0].date, evenE: list.find(e => e.side === 'even'), oddE: list.find(e => e.side === 'odd') };
+      return { evenE: list.find(e => e.side === 'even'), oddE: list.find(e => e.side === 'odd') };
     }
   }
   return null;

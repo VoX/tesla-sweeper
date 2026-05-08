@@ -22,11 +22,11 @@ export function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis
         </>
       ) : (
         <>
-          {slackUserId ? (
+          {slackUserId && (
             <p style={{ fontSize: '0.85rem', marginBottom: 12 }}>
               🔐 Signed in as <code>{slackUserId}</code>. Click Enable to subscribe, or sign in as someone else.
             </p>
-          ) : null}
+          )}
           <button onClick={onSlackSignIn} disabled={notifLoading} style={{ marginBottom: 12 }}>
             {notifLoading ? 'Connecting to Slack...' : (slackUserId ? 'Switch slack account' : 'Sign in with Slack')}
           </button>

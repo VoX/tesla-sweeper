@@ -198,17 +198,20 @@ export function startNotificationCron() {
 // and the last successful run was on a prior date (in ET), fire once.
 // Avoids the failure mode where the service restarts between 12:00pm
 // and tomorrow's cron, silently skipping today.
+// Returns the runNotifications promise (or null when no recovery
+// needed) so the caller can await — chaining run+digest sequentially
+// matters because runNotifications throws on cross-mode overlap.
 export function maybeRecoverMissedRun() {
   const fmtDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' });
   const fmtHour = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false });
   const todayET = fmtDate.format(new Date());
   const hourET = parseInt(fmtHour.format(new Date()), 10);
-  if (hourET < 12) return;
+  if (hourET < 12) return null;
   const last = loadStore().last_run_at || null;
   const lastDateET = last ? fmtDate.format(new Date(last)) : null;
-  if (lastDateET === todayET) return;
+  if (lastDateET === todayET) return null;
   console.log(`[cron] recovering missed run (last: ${lastDateET || 'never'}, today: ${todayET})`);
-  runNotifications().catch(e => console.error('[cron] missed-run recovery failed:', e));
+  return runNotifications();
 }
 
 // Symmetric digest recovery: if today is Sunday past 8PM ET and we
@@ -219,11 +222,11 @@ export function maybeRecoverMissedDigest() {
   const fmtDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' });
   const fmtParts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short', hour: '2-digit', hour12: false });
   const parts = Object.fromEntries(fmtParts.formatToParts(now).map(p => [p.type, p.value]));
-  if (parts.weekday !== 'Sun' || parseInt(parts.hour, 10) < 20) return;
+  if (parts.weekday !== 'Sun' || parseInt(parts.hour, 10) < 20) return null;
   const todayET = fmtDate.format(now);
   const last = loadStore().last_digest_run_at || null;
   const lastDateET = last ? fmtDate.format(new Date(last)) : null;
-  if (lastDateET === todayET) return;
+  if (lastDateET === todayET) return null;
   console.log(`[cron] recovering missed digest (last: ${lastDateET || 'never'}, today: ${todayET})`);
-  runNotifications({ mode: 'weekly' }).catch(e => console.error('[cron] missed-digest recovery failed:', e));
+  return runNotifications({ mode: 'weekly' });
 }

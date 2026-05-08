@@ -83,10 +83,9 @@ export async function whichSide(lat, lng) {
   const leftIsOdd = leftOdd + rightEven;
   const evenSideSign = leftIsEven > leftIsOdd ? +1 : leftIsOdd > leftIsEven ? -1 : null;
 
-  let side = 'unknown';
-  if (evenSideSign != null && cross !== 0) {
-    side = (cross === evenSideSign) ? 'even' : 'odd';
-  }
+  const side = (evenSideSign != null && cross !== 0)
+    ? (cross === evenSideSign ? 'even' : 'odd')
+    : 'unknown';
 
   // Closest building on each side — for response display.
   const f = best.foot;

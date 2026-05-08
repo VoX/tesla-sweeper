@@ -5,7 +5,7 @@
 // Per OSM Nominatim policy: User-Agent must identify the app + provide
 // a contact URL so the maintainers can reach us on abuse.
 export const UA = 'TeslaSweeper/1.0 (+https://claw.bitvox.me/sweeper/)';
-export const FETCH_TIMEOUT = 12000;
+const FETCH_TIMEOUT = 12000;
 
 export const fetchWithTimeout = (url, options = {}) =>
   fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), ...options });

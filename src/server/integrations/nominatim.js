@@ -20,12 +20,15 @@ const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
 const REVERSE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const reverseCache = new Map();
 
-let lastCall = 0;
+// Reserve the slot BEFORE awaiting — concurrent callers race past the
+// gate otherwise (both compute wait against the same lastCall, both
+// sleep, both fire simultaneously, violating the 1 req/sec rule).
+let nextSlot = 0;
 export async function nominatimFetch(url, options) {
   const now = Date.now();
-  const wait = Math.max(0, 1000 - (now - lastCall));
-  if (wait > 0) await new Promise(r => setTimeout(r, wait));
-  lastCall = Date.now();
+  const fireAt = Math.max(now, nextSlot);
+  nextSlot = fireAt + 1000;
+  if (fireAt > now) await new Promise(r => setTimeout(r, fireAt - now));
   return fetchWithTimeout(url, options);
 }
 
@@ -49,8 +52,3 @@ export async function reverseGeocodeLocation(lat, lng) {
   reverseCache.set(key, { at: Date.now(), value: out });
   return out;
 }
-
-// Test / debug hook — flush the cache so a repeat query re-hits
-// Nominatim. Not exported through the integrations barrel; only
-// used by the test file directly.
-export function _resetReverseCache() { reverseCache.clear(); }

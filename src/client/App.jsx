@@ -250,7 +250,7 @@ export default function App() {
       // bubbling up. Without this, the page sat on a failed /vehicles
       // until the 60s setInterval polling tick eventually triggered
       // the refresh on its own.
-      if (e.message.includes('401') && tokens?.refresh_token) {
+      if (e.status === 401 && tokens?.refresh_token) {
         const newToken = await refreshToken();
         if (newToken) data = await post('vehicles', { token: newToken });
         else throw e;
@@ -274,7 +274,7 @@ export default function App() {
     try {
       vehicle = await post('check', body);
     } catch (e) {
-      if (e.message.includes('401') && tokens?.refresh_token) {
+      if (e.status === 401 && tokens?.refresh_token) {
         const newToken = await refreshToken();
         if (newToken) vehicle = await post('check', { ...body, token: newToken });
         else throw e;
@@ -450,8 +450,9 @@ export default function App() {
           // asleep. The other auto-check (tokens-loaded effect) stays
           // gated on state==online so subsequent passive page loads
           // don't drain the battery.
-          if (vlist[0].state !== 'online') setWaking(true);
-          setOauthStatus(vlist[0].state === 'online'
+          const isOnline = vlist[0].state === 'online';
+          if (!isOnline) setWaking(true);
+          setOauthStatus(isOnline
             ? '\u2705 Connected! Checking your car...'
             : '\u2705 Connected \u2014 waking your car (up to 60s)...');
           try { await checkVehicle(data.access_token, vlist[0].id); }
@@ -491,10 +492,10 @@ export default function App() {
           {tokens ? (
             <>
               <div className="oauth-status">{oauthStatus || '\u2705 Connected'}</div>
-              {vehicles && vehicles.length === 0 && (
+              {vehicles?.length === 0 && (
                 <p style={{fontSize: '0.85rem', color: '#8b949e', marginBottom: 16}}>No vehicles registered on this Tesla account. Add a vehicle in the Tesla app and try again.</p>
               )}
-              {vehicles && vehicles.length > 1 && (
+              {vehicles?.length > 1 && (
                 <div style={{marginBottom: 16}}>
                   <label>Select Vehicle</label>
                   <select value={selectedVehicle || ''} onChange={e => setSelectedVehicle(e.target.value)} style={{width: '100%', padding: '10px 12px', background: '#161b22', border: '1px solid #30363d', borderRadius: 6, color: '#c9d1d9', fontSize: '0.9rem'}}>
@@ -503,11 +504,11 @@ export default function App() {
                   </select>
                 </div>
               )}
-              {vehicles && vehicles.length > 0 && (
+              {vehicles?.length > 0 && (
                 <button onClick={() => handleCheckCar(selectedVehicle)} disabled={loading || (vehicles.length > 1 && !selectedVehicle)}>{loading ? (waking ? 'Waking your car... (up to 60s)' : 'Checking...') : 'Check My Car'}</button>
               )}
               <LocationResultsView pos={mapPos} data={sweepData} vehicleInfo={vehicleInfo} popupLabel="Your Car" />
-              {vehicles && vehicles.length > 0 && (
+              {vehicles?.length > 0 && (
                 <NotificationsPanel
                   slackUserId={slackUserId}
                   setSlackUserId={setSlackUserId}
@@ -545,7 +546,7 @@ export default function App() {
           <LocationResultsView
             pos={manualPos}
             data={manualSweepData}
-            draggable={true}
+            draggable
             onPinMove={handleManualPinMove}
             popupLabel="Pin location"
           />

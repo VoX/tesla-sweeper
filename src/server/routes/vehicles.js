@@ -33,10 +33,14 @@ vehiclesRouter.post('/api/vehicles', wrap(async (req, res) => {
 
   const vehicles = (await vehiclesRes.json()).response || [];
   console.log(`[vehicles] Found ${vehicles.length} vehicle(s)`);
-  const out = vehicles.map(v => ({ id: v.id, name: v.display_name || 'Unknown', vin: v.vin, state: v.state }));
+  // Stringify v.id at the boundary — Tesla returns 16-digit ints above
+  // MAX_SAFE_INTEGER, JSON round-tripping loses precision, and the SPA's
+  // <select> binds value as a string anyway. One coercion here keeps
+  // every downstream comparison consistent.
+  const out = vehicles.map(v => ({ id: String(v.id), name: v.display_name || 'Unknown', vin: v.vin, state: v.state }));
   if (STUB_VEHICLE_ENABLED && out.length === 0) {
     console.log('[vehicles] injecting stub test vehicle');
-    out.push({ id: STUB_VEHICLE_ID, name: STUB_VEHICLE_NAME, vin: STUB_VEHICLE_VIN, state: 'online' });
+    out.push({ id: String(STUB_VEHICLE_ID), name: STUB_VEHICLE_NAME, vin: STUB_VEHICLE_VIN, state: 'online' });
   }
   res.json({ vehicles: out });
 }));
@@ -82,6 +86,13 @@ vehiclesRouter.post('/api/check', wrap(async (req, res) => {
 }));
 
 vehiclesRouter.post('/api/reverse-geocode', wrap(async (req, res) => {
-  const { lat, lng } = req.body;
+  const lat = Number(req.body?.lat);
+  const lng = Number(req.body?.lng);
+  // Reject non-numeric coords at the boundary — otherwise they hit the
+  // Nominatim cache as "NaN,NaN" and pollute the slot for every other
+  // bad-input call on the same server lifetime.
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return res.status(400).json({ detail: 'lat and lng must be numeric' });
+  }
   res.json(await reverseGeocodeLocation(lat, lng));
 }));

@@ -11,11 +11,10 @@ import { bearerOk } from '../crypto/bearer.js';
 import { loadSubs, saveSubs, publicSub } from '../store/subscriptions.js';
 import {
   STUB_REFRESH_TOKEN, isStubVehicle,
-  teslaTokenExchange, TESLA_BASE,
+  teslaTokenExchange,
 } from '../integrations/tesla.js';
 import { postSlackDM } from '../integrations/slack.js';
 import { runNotifications } from '../notifications/cron.js';
-import { fetchWithTimeout } from '../util/fetch.js';
 
 const TESLA_APP_CLIENT_ID = process.env.TESLA_CLIENT_ID || '';
 const NOTIFICATIONS_RUN_TOKEN = process.env.NOTIFICATIONS_RUN_TOKEN || '';
@@ -38,32 +37,22 @@ notificationsRouter.post('/api/notifications/enable', wrap(async (req, res) => {
   if (!SLACK_USER_ID_RE.test(slack_user_id)) {
     return res.status(400).json({ detail: 'slack_user_id should look like U060NLFUM' });
   }
-  // Stub bypass: skip Tesla refresh + vehicle-id lookup. The cron path
-  // branches on STUB_REFRESH_TOKEN to short-circuit too.
+  // Stub bypass: skip Tesla refresh entirely. The cron path branches
+  // on STUB_REFRESH_TOKEN to short-circuit too.
   let storedRefreshToken = STUB_REFRESH_TOKEN;
   if (!isStubVehicle(vehicle_id)) {
-    // Validate the refresh_token by doing one round-trip. Catches typos
-    // and revoked tokens before we persist garbage.
+    // Validate the refresh_token by exchanging it once. Tesla rotates
+    // on every exchange, so we MUST persist the rotated value before
+    // doing anything else that could throw — the original is now dead.
+    // (We previously also did a vehicles-lookup here to verify reach;
+    // a network failure between rotation and persistence locked the
+    // user out. The cron's stuck-sub DM (3 consecutive failures)
+    // surfaces bad vehicle_ids well enough.)
     let rotated;
     try {
       rotated = await teslaTokenExchange({ grant_type: 'refresh_token', client_id: TESLA_APP_CLIENT_ID, refresh_token });
     } catch (e) {
       return res.status(400).json({ detail: 'Refresh token invalid: ' + e.message });
-    }
-    // Confirm the supplied vehicle_id is reachable with this token —
-    // otherwise the cron 404s daily forever. Tesla vehicle IDs are
-    // 16-digit ints above MAX_SAFE_INTEGER, so JSON round-tripping
-    // can lose precision and === will silently miss. Compare as strings.
-    try {
-      const vr = await fetchWithTimeout(`${TESLA_BASE}/api/1/vehicles`, {
-        headers: { Authorization: `Bearer ${rotated.access_token}`, 'Content-Type': 'application/json' },
-      });
-      const list = vr.ok ? ((await vr.json()).response || []) : [];
-      if (!list.some(v => String(v.id) === String(vehicle_id))) {
-        return res.status(400).json({ detail: 'vehicle_id not on this Tesla account' });
-      }
-    } catch (e) {
-      return res.status(502).json({ detail: 'Tesla vehicles lookup failed: ' + e.message });
     }
     storedRefreshToken = rotated.refresh_token || refresh_token;
   }
