@@ -8,12 +8,13 @@
     "src/client"
   ],
   "scripts": {
-    "dev": "concurrently -k -n srv,cli -c blue,magenta \"npm run dev -w @tesla-sweeper/server\" \"npm run dev -w @tesla-sweeper/client\"",
+    "dev": "concurrently -k -n srv,cli \"npm:dev -w @tesla-sweeper/server\" \"npm:dev -w @tesla-sweeper/client\"",
     "build": "npm run build -w @tesla-sweeper/client",
     "start": "npm run start -w @tesla-sweeper/server",
-    "test": "npm run test --workspaces --if-present"
+    "test": "npm test --workspaces --if-present"
   },
   "devDependencies": {
-    "concurrently": "^9.0.0"
+    "concurrently": "^9.0.0",
+    "vitest": "^4.1.5"
   }
 }

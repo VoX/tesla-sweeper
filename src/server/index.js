@@ -1,10 +1,12 @@
 import express from 'express';
 import { fileURLToPath } from 'url';
-import { dirname, join, extname } from 'path';
+import { dirname, join } from 'path';
 import { randomBytes, timingSafeEqual, createHmac } from 'node:crypto';
-import { readFileSync, writeFileSync, renameSync, mkdirSync, statSync } from 'fs';
+import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
 import cron from 'node-cron';
 import { classifyWeek, shouldDispatchPlan, formatPlanDM, formatWeeklyDigest } from './notifications/planner.js';
+import { wrap } from './middleware/errors.js';
+import { brotliMiddleware } from './middleware/brotli.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Repo-root-relative paths anchor on this file's location after the
@@ -87,11 +89,6 @@ const STUB_VEHICLE_LNG = parseFloat(process.env.STUB_VEHICLE_LNG) || -71.107841;
 const STUB_VEHICLE_NAME = process.env.STUB_VEHICLE_NAME || 'Test Vehicle';
 const STUB_REFRESH_TOKEN = 'STUB_REFRESH_TOKEN';   // sentinel persisted in subscriptions.json; cron branches on it
 function isStubVehicle(id) { return STUB_VEHICLE_ENABLED && String(id) === String(STUB_VEHICLE_ID); }
-
-const wrap = (fn) => (req, res) => fn(req, res).catch(e => {
-  console.error(`${req.path}:`, e.message);
-  res.status(502).json({ detail: 'Upstream service error' });
-});
 
 function fetchWithTimeout(url, options = {}) {
   return fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), ...options });
@@ -976,19 +973,7 @@ app.get('/healthz', (req, res) => {
 // API 404 catch — must be before the SPA catch-all
 app.all('/api/*', (req, res) => res.status(404).json({ detail: 'API endpoint not found' }));
 
-// Serve .br pre-compressed asset when client accepts brotli. Falls
-// through to express.static for the original file otherwise; Caddy's
-// `encode zstd gzip` handles compression for non-br clients.
-const BR_TYPES = { '.js': 'application/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.html': 'text/html' };
-app.use((req, res, next) => {
-  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
-  const type = BR_TYPES[extname(req.path).toLowerCase()];
-  if (!type || !(req.headers['accept-encoding'] || '').includes('br')) return next();
-  const brPath = join(REPO_ROOT, 'dist', req.path) + '.br';
-  try { statSync(brPath); } catch { return next(); }
-  res.set({ 'Content-Encoding': 'br', 'Vary': 'Accept-Encoding', 'Content-Type': `${type}; charset=utf-8` });
-  res.sendFile(brPath);
-});
+app.use(brotliMiddleware(join(REPO_ROOT, 'dist')));
 app.use(express.static(join(REPO_ROOT, 'dist')));
 app.get('*', (req, res) => res.sendFile(join(REPO_ROOT, 'dist', 'index.html')));
 
