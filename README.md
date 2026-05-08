@@ -2,8 +2,6 @@
 
 Check if your car needs to move for Somerville, MA street sweeping.
 
-**Live:** [claw.bitvox.me/sweeper/](https://claw.bitvox.me/sweeper/)
-
 ## What it does
 
 Looks up the street sweeping schedule for any Somerville address using the city's [Recollect](https://api.recollect.net/) data. Tells you if sweeping is happening today, tomorrow, or when the next event is — and which side of the street it covers, with OSM-based detection of which side of the street you're actually parked on.
@@ -37,7 +35,7 @@ Subsequent page opens within 6 hours of a successful "Check My Car" hydrate from
 
 - **Backend:** Node.js / Express, proxies Tesla Fleet API + Recollect + Nominatim + OSM Overpass
 - **Frontend:** Preact + Vite, Leaflet for maps (lazy-loaded)
-- **Hosting:** Caddy reverse proxy on an EC2 instance with brotli pre-compressed assets
+- **Assets:** Vite-built bundle plus brotli-precompressed `.br` siblings served by an Express middleware (falls through to gzip via whatever fronts it)
 
 ## Running locally
 
@@ -62,7 +60,7 @@ npm start
 |---|---|---|
 | `TESLA_CLIENT_ID` | Tesla Login | Tesla developer app client ID |
 | `TESLA_CLIENT_SECRET` | Tesla Login | Tesla developer app client secret |
-| `TESLA_REDIRECT_URI` | Tesla Login | OAuth redirect URI (e.g. `https://claw.bitvox.me/sweeper/`) |
+| `TESLA_REDIRECT_URI` | Tesla Login | OAuth redirect URI registered with the Tesla developer app (must match exactly) |
 | `SLACK_CLIENT_ID` | Sign in with Slack | OIDC client id from a Slack app (api.slack.com/apps) |
 | `SLACK_CLIENT_SECRET` | Sign in with Slack | OIDC client secret |
 | `SLACK_REDIRECT_URI` | Sign in with Slack | Same URL added under app's Redirect URLs |
@@ -98,9 +96,9 @@ Tokens are stored in localStorage for session persistence. Refresh tokens are us
 ## Security model
 
 - **`SESSION_HMAC_KEY` gate**: `/api/notifications/enable` and `/disable` require an HMAC session token issued by `/api/slack/oauth/callback`. Without this binding, anyone with a Tesla refresh_token could subscribe an arbitrary `slack_user_id`. Without the env var set, both endpoints reject every request.
-- **Bearer auth on `/api/notifications/run`**: `crypto.timingSafeEqual` comparison; the endpoint is internet-reachable through Caddy.
+- **Bearer auth on `/api/notifications/run`**: `crypto.timingSafeEqual` comparison.
 - **Body size limit**: Express bodies capped at 10kb.
-- **No CORS headers**: server listens on `127.0.0.1:20040`, only reachable through Caddy at the same origin.
+- **No CORS headers**: server binds to `127.0.0.1` by default; expose via a same-origin reverse proxy.
 - **Refresh tokens** live in `data/subscriptions.json` (mode 0600, dir 0700). Never logged. The `wrap()` async-error helper returns a generic 502 to the client without leaking error details.
 - **Stub vehicle**: `STUB_VEHICLE_ENABLED=1` injects a test vehicle when Tesla returns 0; only intended for dev/testing. The cron path branches on a `STUB_REFRESH_TOKEN` sentinel to short-circuit Tesla calls for stub subs.
 

@@ -4,11 +4,11 @@ Street sweeping checker for Somerville, MA. Tells you if your car needs to move.
 
 ## Architecture
 
-- **Backend:** `server.js` — Express on port 20040. Proxies four external APIs (Tesla Fleet, Recollect, Nominatim, OSM Overpass) and serves the built Preact app as static files. Loads creds from `.env`.
+- **Backend:** `server.js` — Express bound to `127.0.0.1` (default port 20040, configurable via `PORT`). Proxies four external APIs (Tesla Fleet, Recollect, Nominatim, OSM Overpass) and serves the built Preact app as static files. Loads creds from `.env`.
 - **Frontend:** `src/App.jsx` — Preact + Vite. Two tabs: **Tesla Login** (OAuth) and **Manual** (drag-the-pin). Both use the same `LocationResultsView` component (map + sweep card + side-detection diagnostic). Leaflet is lazy-loaded via `src/leaflet-loader.js`.
-- **Hosting:** Caddy reverse proxy at `claw.bitvox.me/sweeper/`. `redir /sweeper /sweeper/ 308` + `handle_path /sweeper/* { encode zstd gzip; reverse_proxy localhost:20040 }`. Brotli `.br` files are served by an Express middleware before `express.static`; Caddy passes them through untouched.
+- **Compression:** Brotli `.br` siblings are pre-built by a `closeBundle` Vite plugin and served by an Express middleware before `express.static`. Whatever reverse proxy fronts the app is expected to pass `Accept-Encoding: br` through; gzip falls through to the proxy.
 - **Storage:** `data/subscriptions.json` (mode 0600, dir 0700, atomic temp+rename writes) — daily-notification subs with Tesla `refresh_token`, `consecutive_failures`, `last_dm_date`, `last_dm_error_at`. Gitignored.
-- **Daily notifications:** in-process `node-cron` schedule (`0 12 * * *` America/New_York) registered from the `app.listen` callback. Missed-run recovery on startup if past noon ET and `last_run_at` is from a prior date.
+- **Notifications:** in-process `node-cron`. Daily `0 12 * * *` America/New_York fires `runNotifications({mode:'daily'})`; weekly `0 20 * * 0` America/New_York fires the Sunday digest (`mode:'weekly'`). Missed-run + missed-digest recovery helpers run on boot if `last_run_at` / `last_digest_run_at` is stale.
 
 ## External APIs
 
@@ -105,7 +105,7 @@ If sweeping was scheduled today but `past_noon` is true, status is demoted to `i
 `/api/vehicles` lists all vehicles on the account. Multiple → dropdown. One → auto-selects. Zero + `STUB_VEHICLE_ENABLED` → stub injected.
 
 ### Partner registration
-The app is registered with Tesla Fleet API. Public key at `claw.bitvox.me/.well-known/appspecific/com.tesla.3p.public-key.pem` (served by Caddy from `~/projects/tesla-sweeper/keys/public-key.pem`). Private key in `keys/` (gitignored).
+The app must be registered with the Tesla Fleet API. Tesla pulls the public key from `<your-domain>/.well-known/appspecific/com.tesla.3p.public-key.pem` — keep `keys/public-key.pem` reachable at that path via your reverse proxy. Private key in `keys/` (gitignored).
 
 ## Development
 
@@ -117,16 +117,6 @@ npm start      # Express serves dist/ in production
 ```
 
 Vite proxies `/sweeper/api/*` to `localhost:20040` in dev mode. The React-style code uses `preact/hooks` — make sure new text inputs use `onInput` not `onChange` (preact's onChange fires on blur, not per keystroke).
-
-## Deployment
-
-```
-ExecStart=/usr/bin/node server.js
-Environment=PORT=20040
-WorkingDirectory=/home/ec2-user/projects/tesla-sweeper
-```
-
-After code changes: `npm run build && systemctl --user restart tesla-sweeper.service`.
 
 ## Common Pitfalls
 
