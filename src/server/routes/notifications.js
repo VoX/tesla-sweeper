@@ -77,7 +77,7 @@ notificationsRouter.post('/api/notifications/enable', wrap(async (req, res) => {
   // the response so the SPA can hint at it.
   const dm = await postSlackDM(
     slack_user_id,
-    `:car: Tesla sweeper notifications enabled for *${sub.vehicle_name}*. I'll DM you 1, 2, and 3 days before each sweep at noon ET. Disable anytime at https://claw.bitvox.me/sweeper/.`
+    `:car: Tesla sweeper notifications enabled for *${sub.vehicle_name}*. I'll DM you 1, 2, and 3 days before each sweep at noon ET. Disable anytime at https://sweeper.bitvox.me/.`
   );
   res.json({ enabled: true, id: sub.id, test_dm_ok: dm.ok, test_dm_error: dm.error || null });
 }));

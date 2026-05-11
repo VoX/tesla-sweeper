@@ -150,7 +150,7 @@ export async function runNotifications({ mode = 'daily' } = {}) {
         const lastErrTs = out.last_dm_error_at ? Date.parse(out.last_dm_error_at) : 0;
         if (Date.now() - lastErrTs < STUCK_DM_COOLDOWN_MS) continue;
         const dm = await postSlackDM(out.slack_user_id,
-          `:warning: *${out.vehicle_name}* sweeper notifications have been failing for ${out.consecutive_failures} runs. Last error: \`${out.error}\`. Re-enable at <https://claw.bitvox.me/sweeper/>.`);
+          `:warning: *${out.vehicle_name}* sweeper notifications have been failing for ${out.consecutive_failures} runs. Last error: \`${out.error}\`. Re-enable at <https://sweeper.bitvox.me/>.`);
         out.error_dm_sent = dm.ok;
         if (dm.ok) patchSub(out.sub_id, { last_dm_error_at: new Date().toISOString() });
       }

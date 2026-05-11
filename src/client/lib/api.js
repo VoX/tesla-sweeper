@@ -1,8 +1,7 @@
 // Thin wrapper over fetch for the SPA's POST + GET API calls.
-// Pulls all `/sweeper/api` traffic in one place so the dev/prod URL
-// switch lives in exactly one constant.
+// Same-origin under sweeper.bitvox.me — no path-prefix dance.
 
-const API = import.meta.env.DEV ? '/sweeper/api' : 'api';
+const API = '/api';
 
 async function handleRes(res) {
   if (!res.ok) {

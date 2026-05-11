@@ -62,13 +62,12 @@ const brotliPrecompress = {
 export default defineConfig({
   root: __dirname,
   plugins: [preact(), inlineMainCss, brotliPrecompress],
-  base: '/sweeper/',
+  base: '/',
   server: {
     port: 5173,
     proxy: {
-      '/sweeper/api': {
+      '/api': {
         target: 'http://localhost:20040',
-        rewrite: (path) => path.replace(/^\/sweeper/, ''),
       },
     },
   },

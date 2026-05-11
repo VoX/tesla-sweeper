@@ -28,14 +28,25 @@ vi.mock('../integrations/slack.js', () => ({
   postSlackDM: vi.fn().mockResolvedValue({ ok: true }),
 }));
 
+// Use a sweep-event date 2 days in the future from "today" (in ET) so the
+// planner's window filter (`d >= 0 && d <= 7`) accepts it AND
+// `shouldDispatchPlan` (1 ≤ daysUntilPrimary ≤ 3) fires. Hard-coded dates
+// drift past the window as wall-clock advances.
+const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+const inDays = (n) => {
+  const d = new Date(todayET + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
 vi.mock('../sweep/check.js', () => ({
-  runSweepCheck: vi.fn().mockResolvedValue({
-    found: true, days_until_next: 1, status: 'warning', title: 'Move', message: 'tomorrow',
-    car_side: 'even', sweep_events: [{ date: '2026-05-09', side: 'even', time: '8:00 AM - 12:00 PM' }],
-    side_detection: { side: 'even', car_house_number: 12 },
-    house_num: 12, latitude: 42.385, longitude: -71.108,
-  }),
+  runSweepCheck: vi.fn(),
 }));
+const { runSweepCheck } = await import('../sweep/check.js');
+runSweepCheck.mockResolvedValue({
+  found: true, days_until_next: 2, status: 'warning', title: 'Move', message: 'soon',
+  car_side: 'even', sweep_events: [{ date: inDays(2), side: 'even', time: '8:00 AM - 12:00 PM' }],
+  side_detection: { side: 'even', car_house_number: 12 },
+  house_num: 12, latitude: 42.385, longitude: -71.108,
+});
 
 const { loadStore, saveStore, patchSub } = await import('../store/subscriptions.js');
 const { postSlackDM } = await import('../integrations/slack.js');
@@ -88,7 +99,7 @@ describe('runNotifications stub vehicle short-circuit', () => {
 describe('runNotifications dispatch', () => {
   it("daily mode sends a DM via formatPlanDM when plan triggers", async () => {
     const out = await runNotifications({ mode: 'daily' });
-    // Sweep-check returns days_until_next=1, side=even — planner would fire.
+    // Sweep-check returns days_until_next=2, side=even — planner would fire.
     expect(out.results[0].plan).toBeDefined();
     // Must actually have called postSlackDM with the addressed user. A
     // green test on plan-defined alone would silently pass even if the

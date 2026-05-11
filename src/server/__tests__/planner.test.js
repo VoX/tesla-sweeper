@@ -315,11 +315,11 @@ describe('formatPlanDM — message smoke tests', () => {
     const m = fmt(cls([ev('2026-05-12', 'even')], { carSide: null }));
     expect(m).toContain('Sweep on EVEN');
     expect(m).toContain("Couldn't auto-detect");
-    expect(m).toContain('claw.bitvox.me/sweeper');
+    expect(m).toContain('sweeper.bitvox.me');
   });
 
   it('routine flips do NOT include the URL footer', () => {
-    expect(fmt(cls([ev('2026-05-12', 'even'), ev('2026-05-26', 'odd')]))).not.toContain('claw.bitvox.me/sweeper');
+    expect(fmt(cls([ev('2026-05-12', 'even'), ev('2026-05-26', 'odd')]))).not.toContain('sweeper.bitvox.me');
   });
 });
 
