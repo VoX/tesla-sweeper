@@ -92,6 +92,35 @@ describe('App', () => {
     expect(opts.some(t => t.includes('Test Vehicle (test)'))).toBe(true);
   });
 
+  it('returning from a Slack OAuth redirect: clears the "Exchanging…" status, bootstraps the Tesla session, and adopts the OIDC-verified slack id (not /session/me\'s)', async () => {
+    sessionStorage.setItem('slack_oauth_state', 'SSTATE');
+    window.history.replaceState({}, '', '/oauth?code=SCODE&state=SSTATE');
+    routes = {
+      'slack/oauth/callback': { slack_user_id: 'U060NLFUM', name: 'Kit', session: 'sess-abc' },
+      // The record reports a *different* slack id — adoptSlackId=false must
+      // keep this from clobbering the freshly-verified one above.
+      'session/me': { authenticated: true, slack_user_id: 'USTALE000', vehicle_id: null, vehicle_name: null },
+      '/api/vehicles': { vehicles: [] },
+      'notifications/status': { subscriptions: [] },
+    };
+    const { container } = await renderApp();
+    // Slack callback was exchanged.
+    expect(globalThis.fetch.mock.calls.some(([u]) => String(u).includes('slack/oauth/callback'))).toBe(true);
+    // "Exchanging slack code for identity…" must not still be on screen.
+    expect(container.textContent).not.toMatch(/exchanging slack code/i);
+    // Tesla session bootstrapped despite the Slack-branch early return:
+    // connected view, not the "Connect Tesla Account" button.
+    const btns = Array.from(container.querySelectorAll('button')).map(b => b.textContent);
+    expect(btns.some(t => /disconnect/i.test(t))).toBe(true);
+    expect(btns.some(t => /connect tesla/i.test(t))).toBe(false);
+    // slackUserId came from the callback (U060NLFUM), not the record
+    // (USTALE000) — proven by the subscriptions fetch firing for it
+    // (only happens when loggedIn && slackUserId are both set).
+    const statusCall = globalThis.fetch.mock.calls.find(([u]) => String(u).includes('notifications/status'));
+    expect(statusCall).toBeTruthy();
+    expect(String(statusCall[0])).toContain('U060NLFUM');
+  });
+
   it('Enable Daily Notifications is disabled (and posts nothing) until you sign in with Slack', async () => {
     routes = {
       'session/me': { authenticated: true, slack_user_id: null, vehicle_id: null, vehicle_name: null },

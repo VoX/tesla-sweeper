@@ -321,12 +321,15 @@ export default function App() {
   // pull the slack_user_id (if the server has one on the record), fetch
   // the vehicle list, and run the gentle auto-check. Skipped when we're
   // returning from an OAuth redirect (handled by the ?code= effect).
-  const checkSession = useCallback(async () => {
+  const checkSession = useCallback(async ({ adoptSlackId = true } = {}) => {
     try {
       const me = await get('session/me').catch(() => ({ authenticated: false }));
       if (me.authenticated) {
         setLoggedIn(true);
-        if (me.slack_user_id) setSlackUserId(me.slack_user_id);
+        // adoptSlackId=false when called right after a Slack OIDC callback:
+        // the callback already set the freshly-verified id and /session/me's
+        // record copy must not race-clobber it.
+        if (adoptSlackId && me.slack_user_id) setSlackUserId(me.slack_user_id);
         // fetchVehicles handles a 401 itself (→ handleAuthExpired). A
         // non-401 (5xx / network) shouldn't strand the SPA on the
         // "checking…" gate — surface it and let the user retry/reload.
@@ -469,11 +472,14 @@ export default function App() {
           setNotifError('Slack sign-in failed: ' + e.message);
           showToast('❌ Slack sign-in failed: ' + e.message);
         })
-        .finally(() => { setNotifLoading(false); setAuthChecked(true); });
-      // Don't call checkSession() here — it would race the slack `.then`
-      // and could clobber the freshly-set slackUserId with the (possibly
-      // stale) slack_user_id from /me's user record. The Tesla cookie
-      // (if any) is re-bootstrapped on the next normal page load.
+        // Clear the "Exchanging…" status either way — on success the panel
+        // shows the signed-in state; the toast covers the transient cheer.
+        .finally(() => { setNotifLoading(false); setOauthStatus(''); setAuthChecked(true); });
+      // Also bootstrap the Tesla session so the page doesn't still say
+      // "Connect Tesla Account" after a Slack sign-in. adoptSlackId=false:
+      // /session/me's record copy of slack_user_id mustn't clobber the
+      // freshly-OIDC-verified id set in the .then above.
+      checkSession({ adoptSlackId: false });
       return;
     }
 
