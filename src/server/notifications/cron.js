@@ -5,7 +5,7 @@
 
 import cron from 'node-cron';
 import { classifyWeek, shouldDispatchPlan, formatPlanDM, formatWeeklyDigest } from './planner.js';
-import { loadStore, saveStore, patchSub } from '../store/subscriptions.js';
+import { loadStore, saveStore, patchSub, loadSubscribedUsers } from '../store/users.js';
 import {
   STUB_VEHICLE_ENABLED, STUB_REFRESH_TOKEN, STUB_VEHICLE_LAT, STUB_VEHICLE_LNG,
   teslaTokenExchange, fetchVehicleData,
@@ -31,7 +31,7 @@ export async function runNotifications({ mode = 'daily' } = {}) {
   }
   runningMode = mode;
   runningNotifications = (async () => {
-    const subs = loadStore().subscriptions || [];
+    const subs = loadSubscribedUsers();
     const results = [];
     const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
 

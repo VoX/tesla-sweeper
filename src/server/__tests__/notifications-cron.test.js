@@ -3,10 +3,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // Mock everything the cron touches; the test exercises mode validation,
 // single-flight behavior, and stub-vehicle short-circuit logic.
 
-vi.mock('../store/subscriptions.js', () => ({
+vi.mock('../store/users.js', () => ({
   loadStore: vi.fn(),
   saveStore: vi.fn(),
   patchSub: vi.fn(),
+  loadSubscribedUsers: vi.fn(),
 }));
 
 vi.mock('../integrations/tesla.js', () => ({
@@ -48,20 +49,21 @@ runSweepCheck.mockResolvedValue({
   house_num: 12, latitude: 42.385, longitude: -71.108,
 });
 
-const { loadStore, saveStore, patchSub } = await import('../store/subscriptions.js');
+const { loadStore, saveStore, patchSub, loadSubscribedUsers } = await import('../store/users.js');
 const { postSlackDM } = await import('../integrations/slack.js');
 const { runNotifications } = await import('../notifications/cron.js');
 
+const SUB = {
+  id: 'sub1', slack_user_id: 'U060NLFUM', vehicle_id: '999999999999999',
+  vehicle_name: 'Test Vehicle', refresh_token: 'STUB_REFRESH_TOKEN',
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
-  loadStore.mockReturnValue({
-    subscriptions: [
-      {
-        id: 'sub1', slack_user_id: 'U060NLFUM', vehicle_id: 999999999999999,
-        vehicle_name: 'Test Vehicle', refresh_token: 'STUB_REFRESH_TOKEN',
-      },
-    ],
-  });
+  // loadStore is only used by the run-timestamp write + recovery helpers.
+  loadStore.mockReturnValue({ users: [] });
+  // loadSubscribedUsers is the cron's working set.
+  loadSubscribedUsers.mockReturnValue([{ ...SUB }]);
 });
 
 describe('runNotifications mode validation', () => {
@@ -112,14 +114,9 @@ describe('runNotifications dispatch', () => {
 
   it('clears last_dm_error_at on recovery so a future outage can DM immediately', async () => {
     // Sub had a stuck-DM cooldown set last week; this run succeeds.
-    loadStore.mockReturnValue({
-      subscriptions: [{
-        id: 'sub1', slack_user_id: 'U060NLFUM', vehicle_id: 999999999999999,
-        vehicle_name: 'Test Vehicle', refresh_token: 'STUB_REFRESH_TOKEN',
-        last_dm_error_at: '2026-04-30T17:00:00.000Z',
-        consecutive_failures: 5,
-      }],
-    });
+    loadSubscribedUsers.mockReturnValue([{
+      ...SUB, last_dm_error_at: '2026-04-30T17:00:00.000Z', consecutive_failures: 5,
+    }]);
     await runNotifications({ mode: 'daily' });
     // The persist call should include last_dm_error_at: null. Find it.
     const persistCall = patchSub.mock.calls.find(([id, patch]) => id === 'sub1' && 'last_check_at' in patch);
@@ -132,13 +129,7 @@ describe('runNotifications dispatch', () => {
     // Pre-set last_digest_date to today's ET date so the dedup branch skips
     // the DM. Today's ET-format date:
     const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
-    loadStore.mockReturnValue({
-      subscriptions: [{
-        id: 'sub1', slack_user_id: 'U060NLFUM', vehicle_id: 999999999999999,
-        vehicle_name: 'Test Vehicle', refresh_token: 'STUB_REFRESH_TOKEN',
-        last_digest_date: todayET,
-      }],
-    });
+    loadSubscribedUsers.mockReturnValue([{ ...SUB, last_digest_date: todayET }]);
     const out = await runNotifications({ mode: 'weekly' });
     expect(out.results[0].digest_skipped).toBe('already-sent-today');
     // Slack DM should NOT have fired this run (the existing all-clear from

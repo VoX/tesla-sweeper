@@ -1,5 +1,14 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 import request from 'supertest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// Point the user store at a throwaway dir BEFORE any import that loads
+// store/users.js (probesRouter + notificationsRouter both do, and that
+// module runs its legacy-migration at import time). Without this, a
+// fresh-clone `npm test` would migrate the real data/ dir.
+process.env.SWEEPER_DATA_DIR = mkdtempSync(join(tmpdir(), 'sweeper-routes-test-'));
 
 // Set deterministic env BEFORE the app loads so the HMAC + bearer
 // gates have known values (config.js reads .env first; explicit env

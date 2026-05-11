@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { wrap } from '../middleware/errors.js';
 import { verifySession } from '../crypto/session.js';
 import { bearerOk } from '../crypto/bearer.js';
-import { loadSubs, saveSubs, publicSub } from '../store/subscriptions.js';
+import { loadSubs, saveSubs, publicSub } from '../store/users.js';
 import {
   STUB_REFRESH_TOKEN, isStubVehicle,
   teslaTokenExchange,
