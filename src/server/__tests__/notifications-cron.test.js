@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('../store/users.js', () => ({
   loadStore: vi.fn(),
   saveStore: vi.fn(),
-  patchSub: vi.fn(),
+  patchUser: vi.fn(),
   loadSubscribedUsers: vi.fn(),
 }));
 
@@ -53,7 +53,7 @@ runSweepCheck.mockResolvedValue({
   house_num: 12, latitude: 42.385, longitude: -71.108,
 });
 
-const { loadStore, patchSub, loadSubscribedUsers } = await import('../store/users.js');
+const { loadStore, patchUser, loadSubscribedUsers } = await import('../store/users.js');
 const { postSlackDM } = await import('../integrations/slack.js');
 const { getTeslaAccess } = await import('../integrations/tesla-auth.js');
 const { fetchVehicleData } = await import('../integrations/tesla.js');
@@ -143,7 +143,7 @@ describe('runNotifications dispatch', () => {
     expect(postSlackDM).toHaveBeenCalledWith('U060NLFUM', expect.stringContaining('Move'));
     // And persisted last_dm_date so a same-day re-run dedupes.
     const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
-    expect(patchSub).toHaveBeenCalledWith('sub1', { last_dm_date: todayET });
+    expect(patchUser).toHaveBeenCalledWith('sub1', { last_dm_date: todayET });
   });
 
   it('clears last_dm_error_at on recovery so a future outage can DM immediately', async () => {
@@ -153,7 +153,7 @@ describe('runNotifications dispatch', () => {
     }]);
     await runNotifications({ mode: 'daily' });
     // The persist call should include last_dm_error_at: null. Find it.
-    const persistCall = patchSub.mock.calls.find(([id, patch]) => id === 'sub1' && 'last_check_at' in patch);
+    const persistCall = patchUser.mock.calls.find(([id, patch]) => id === 'sub1' && 'last_check_at' in patch);
     expect(persistCall).toBeDefined();
     expect(persistCall[1].last_dm_error_at).toBeNull();
     expect(persistCall[1].consecutive_failures).toBe(0);

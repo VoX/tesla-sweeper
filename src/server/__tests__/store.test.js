@@ -8,7 +8,7 @@ import { join } from 'node:path';
 // `npm test` touching the real data/ dir on a fresh clone.
 process.env.SWEEPER_DATA_DIR = mkdtempSync(join(tmpdir(), 'sweeper-store-test-'));
 
-const { publicUser, publicSub } = await import('../store/users.js');
+const { publicUser } = await import('../store/users.js');
 
 // The store module reads/writes a real path resolved at import time
 // (`<repo>/data/users.json`) and runs a legacy-migration on first import.
@@ -44,9 +44,5 @@ describe('publicUser', () => {
     const out = publicUser(minimal);
     expect(out.id).toBe('b');
     expect(out.last_check_at).toBeUndefined();
-  });
-
-  it('publicSub is an alias for publicUser (legacy callers)', () => {
-    expect(publicSub).toBe(publicUser);
   });
 });

@@ -189,19 +189,3 @@ export function publicUser(u) {
   return { id: u.id, slack_user_id: u.slack_user_id, vehicle_name: u.vehicle_name,
     vehicle_id: u.vehicle_id, created_at: u.created_at, last_check_at: u.last_check_at };
 }
-
-// ── Legacy aliases ─────────────────────────────────────────────────────
-// Callers not yet migrated to the new vocabulary. Phase 6 of the BFF plan
-// swaps these out; until then routes/notifications + cron use the old
-// names against the new schema.
-export const loadSubs = loadSubscribedUsers;
-export const patchSub = patchUser;
-export const publicSub = publicUser;
-// saveSubs replaces the subscribed set, keeping non-subscribed records
-// (logged-in-only users — none exist until Phase 4, but be correct now).
-export function saveSubs(subs) {
-  const s = loadStore();
-  const others = s.users.filter(u => !(u.slack_user_id && u.vehicle_id));
-  s.users = [...others, ...subs];
-  saveStore(s);
-}

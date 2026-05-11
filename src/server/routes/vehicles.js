@@ -1,78 +1,96 @@
 // Tesla Fleet API + reverse-geocode proxies for the SPA.
 // /api/vehicles lists, /api/check fetches GPS (stub short-circuit +
 // wake/poll on 408), /api/reverse-geocode wraps Nominatim.
+//
+// Auth (BFF, Phase 6): the preferred path is the signed `session`
+// cookie — the server then brokers a Tesla access_token via
+// getTeslaAccess (which owns refresh-token rotation). A legacy `token`
+// body field is still accepted for one release so a stale cached SPA
+// keeps working; it'll be removed in Phase 8. Cookie wins if both are
+// present.
 
 import { Router } from 'express';
 import { wrap } from '../middleware/errors.js';
 import {
-  STUB_VEHICLE_ENABLED, STUB_VEHICLE_ID, STUB_VEHICLE_VIN, STUB_VEHICLE_LAT, STUB_VEHICLE_LNG,
-  STUB_VEHICLE_NAME, isStubVehicle, fetchVehicleData, TESLA_BASE,
+  STUB_VEHICLE_LAT, STUB_VEHICLE_LNG, STUB_VEHICLE_NAME,
+  isStubVehicle, fetchVehicleData, listVehicles,
 } from '../integrations/tesla.js';
+import { getTeslaAccess, RevokedError, ConfigError, TransientError } from '../integrations/tesla-auth.js';
+import { loadUserBySession } from '../store/users.js';
+import { readSessionCookie } from '../util/session.js';
 import { reverseGeocodeLocation } from '../integrations/nominatim.js';
-import { fetchWithTimeout } from '../util/fetch.js';
 
 export const vehiclesRouter = Router();
 
+// getTeslaAccess throws tagged errors — map them to HTTP. RevokedError →
+// 401 (the SPA should re-OAuth); ConfigError → 502 (server misconfig,
+// page someone); TransientError → 503 (Tesla flaking, retry shortly).
+function mapTeslaAccessError(res, e) {
+  if (e instanceof RevokedError) return res.status(401).json({ detail: 'Tesla authorization expired — re-authorize at https://sweeper.bitvox.me/' });
+  if (e instanceof ConfigError) return res.status(502).json({ detail: 'Tesla OAuth misconfigured (server-side)' });
+  if (e instanceof TransientError) return res.status(503).json({ detail: 'Tesla is temporarily unavailable — try again shortly' });
+  return res.status(502).json({ detail: 'Upstream error' });
+}
+
+// Resolve a usable Tesla access_token: cookie path (broker via
+// getTeslaAccess on the bound record) or legacy `token` body. Returns
+// the token string, or null after sending a 401/4xx/5xx itself — the
+// caller should just `return` on null.
+async function resolveAccess(req, res) {
+  const cookieUser = loadUserBySession(readSessionCookie(req));
+  if (cookieUser) {
+    try { return await getTeslaAccess(cookieUser.id); }
+    catch (e) { mapTeslaAccessError(res, e); return null; }
+  }
+  if (req.body?.token) return req.body.token;
+  res.status(401).json({ detail: 'Not signed in' });
+  return null;
+}
+
 vehiclesRouter.post('/api/vehicles', wrap(async (req, res) => {
-  const { token } = req.body;
-  if (!token) return res.status(400).json({ detail: 'Token required' });
-
+  const accessToken = await resolveAccess(req, res);
+  if (!accessToken) return;
   console.log('[vehicles] Fetching vehicle list');
-  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-  const vehiclesRes = await fetchWithTimeout(`${TESLA_BASE}/api/1/vehicles`, { headers });
-
-  if (vehiclesRes.status === 401) {
-    console.log('[vehicles] 401 — token invalid or expired');
-    return res.status(401).json({ detail: 'Invalid or expired Tesla token' });
+  let vehicles;
+  try { vehicles = await listVehicles(accessToken); }
+  catch (e) {
+    if (e.status === 401) return res.status(401).json({ detail: 'Invalid or expired Tesla token' });
+    console.error('[vehicles] Tesla API error:', e.status, e.message);
+    return res.status(e.status || 502).json({ detail: e.message });
   }
-  if (!vehiclesRes.ok) {
-    const errBody = await vehiclesRes.text().catch(() => '');
-    console.error('[vehicles] Tesla API error:', vehiclesRes.status, errBody);
-    return res.status(vehiclesRes.status).json({ detail: `Tesla API error (${vehiclesRes.status})` });
-  }
-
-  const vehicles = (await vehiclesRes.json()).response || [];
   console.log(`[vehicles] Found ${vehicles.length} vehicle(s)`);
-  // Stringify v.id at the boundary — Tesla returns 16-digit ints above
-  // MAX_SAFE_INTEGER, JSON round-tripping loses precision, and the SPA's
-  // <select> binds value as a string anyway. One coercion here keeps
-  // every downstream comparison consistent.
-  const out = vehicles.map(v => ({ id: String(v.id), name: v.display_name || 'Unknown', vin: v.vin, state: v.state }));
-  if (STUB_VEHICLE_ENABLED && out.length === 0) {
-    console.log('[vehicles] injecting stub test vehicle');
-    out.push({ id: String(STUB_VEHICLE_ID), name: STUB_VEHICLE_NAME, vin: STUB_VEHICLE_VIN, state: 'online', is_stub: true });
-  }
-  res.json({ vehicles: out });
+  res.json({ vehicles });
 }));
 
 vehiclesRouter.post('/api/check', wrap(async (req, res) => {
-  const { token, vehicle_id } = req.body;
-  if (!token) return res.status(400).json({ detail: 'Token required' });
+  const cookieUser = loadUserBySession(readSessionCookie(req));
+  let vid = req.body?.vehicle_id || cookieUser?.vehicle_id || null;
 
-  // Stub short-circuit: skip Tesla wake/poll entirely.
-  if (isStubVehicle(vehicle_id)) {
+  // Stub short-circuit (once vid is resolved) — skip Tesla entirely.
+  if (isStubVehicle(vid)) {
     console.log('[check] returning stub vehicle data');
-    return res.json({
-      vehicle_name: STUB_VEHICLE_NAME,
-      latitude: STUB_VEHICLE_LAT,
-      longitude: STUB_VEHICLE_LNG,
-      battery_level: 78,
-    });
+    return res.json({ vehicle_name: STUB_VEHICLE_NAME, latitude: STUB_VEHICLE_LAT, longitude: STUB_VEHICLE_LNG, battery_level: 78 });
   }
 
-  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  let accessToken;
+  if (cookieUser) {
+    try { accessToken = await getTeslaAccess(cookieUser.id); } catch (e) { return mapTeslaAccessError(res, e); }
+  } else if (req.body?.token) {
+    accessToken = req.body.token;
+  } else {
+    return res.status(401).json({ detail: 'Not signed in' });
+  }
 
-  let vid = vehicle_id;
   if (!vid) {
-    const vehiclesRes = await fetchWithTimeout(`${TESLA_BASE}/api/1/vehicles`, { headers });
-    if (vehiclesRes.status === 401) return res.status(401).json({ detail: 'Invalid or expired Tesla token' });
-    if (!vehiclesRes.ok) return res.status(vehiclesRes.status).json({ detail: 'Tesla API error' });
-    const vehicles = (await vehiclesRes.json()).response || [];
-    if (!vehicles.length) return res.json({ no_vehicles: true });
-    vid = vehicles[0].id;
+    let list;
+    try { list = await listVehicles(accessToken); }
+    catch (e) { return res.status(e.status === 401 ? 401 : (e.status || 502)).json({ detail: e.message }); }
+    if (!list.length) return res.json({ no_vehicles: true });
+    vid = list[0].id;
   }
 
   console.log(`[check] Getting location for vehicle ${vid}`);
+  const headers = { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
   const locData = await fetchVehicleData(headers, vid);
   const { latitude, longitude } = locData.response?.drive_state || {};
   console.log(`[check] Location: ${latitude}, ${longitude}`);

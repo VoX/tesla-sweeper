@@ -5,7 +5,7 @@
 
 import cron from 'node-cron';
 import { classifyWeek, shouldDispatchPlan, formatPlanDM, formatWeeklyDigest } from './planner.js';
-import { loadStore, saveStore, patchSub, loadSubscribedUsers } from '../store/users.js';
+import { loadStore, saveStore, patchUser, loadSubscribedUsers } from '../store/users.js';
 import {
   STUB_VEHICLE_ENABLED, STUB_REFRESH_TOKEN, STUB_VEHICLE_LAT, STUB_VEHICLE_LNG,
   fetchVehicleData,
@@ -100,7 +100,7 @@ export async function runNotifications({ mode = 'daily' } = {}) {
       // outage can DM immediately instead of waiting up to 24h on a
       // stale `last_dm_error_at` from the prior failure window.
       if (out.ok && sub.last_dm_error_at) persist.last_dm_error_at = null;
-      patchSub(sub.id, persist);
+      patchUser(sub.id, persist);
       out.last_dm_error_at = sub.last_dm_error_at || null;
       out.last_dm_date = sub.last_dm_date || null;
       out.last_digest_date = sub.last_digest_date || null;
@@ -122,7 +122,7 @@ export async function runNotifications({ mode = 'daily' } = {}) {
           formatPlanDM({ vehicleName: out.vehicle_name, address: out.address, plan: out.plan }));
         out.dm_sent = dm.ok;
         out.dm_error = dm.error || null;
-        if (dm.ok) patchSub(out.sub_id, { last_dm_date: todayET });
+        if (dm.ok) patchUser(out.sub_id, { last_dm_date: todayET });
       }
     } else if (mode === 'weekly') {
       // Sunday-evening digest: full schedule + recommendation, every sub
@@ -135,7 +135,7 @@ export async function runNotifications({ mode = 'daily' } = {}) {
           formatWeeklyDigest({ vehicleName: out.vehicle_name, address: out.address, plan: out.plan }));
         out.digest_sent = dm.ok;
         out.digest_error = dm.error || null;
-        if (dm.ok) patchSub(out.sub_id, { last_digest_date: todayET });
+        if (dm.ok) patchUser(out.sub_id, { last_digest_date: todayET });
       }
     }
 
@@ -150,7 +150,7 @@ export async function runNotifications({ mode = 'daily' } = {}) {
         const dm = await postSlackDM(out.slack_user_id,
           `:warning: *${out.vehicle_name}* sweeper notifications have been failing for ${out.consecutive_failures} runs. Last error: \`${out.error}\`. Re-enable at <https://sweeper.bitvox.me/>.`);
         out.error_dm_sent = dm.ok;
-        if (dm.ok) patchSub(out.sub_id, { last_dm_error_at: new Date().toISOString() });
+        if (dm.ok) patchUser(out.sub_id, { last_dm_error_at: new Date().toISOString() });
       }
     }
 
