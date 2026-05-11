@@ -3,7 +3,11 @@
 ## Goal
 
 Move Tesla refresh-token ownership entirely to the server. The SPA stops storing
-or transmitting any Tesla token; it just carries a session cookie.
+or transmitting any Tesla token; it carries only a session cookie.
+
+**One canonical refresh_token per user**, owned by the server, used by both the
+SPA-driven request paths AND the daily notification cron through the same
+helper. No two stores rotating in parallel; no client-side rotation logic.
 
 This eliminates the rotation collision that exists today, where the SPA and the
 server independently rotate the same refresh_token and silently invalidate each
@@ -11,11 +15,12 @@ other's copy.
 
 ## Why now
 
-### The current bug, concretely
+### The bug, concretely
 
 Tesla Fleet API rotates refresh_tokens on every exchange — the old one is
-revoked the moment a new one is issued. Today, both the SPA and the server hold
-the same refresh_token after enrollment:
+revoked the moment a new one is issued. Today, both the SPA and the server end
+up holding the same refresh_token after enrollment, and they rotate it
+independently:
 
 1. User OAuths in the SPA. Tesla returns `RT0`. SPA stashes it in
    `localStorage['tesla_tokens']`.
@@ -29,12 +34,6 @@ the same refresh_token after enrollment:
 Even ignoring the enroll-time collision, ongoing operation has the same shape:
 whichever side rotates first poisons the other's stored copy.
 
-The cron only refreshes once per day (noon ET). The SPA refreshes whenever the
-user opens the page after a token expires (~every 8h of active use). If the SPA
-beats the cron to a refresh, the cron's stored token is dead the next morning;
-its `runNotifications` errors out for that sub, three days later the stuck-DM
-fires.
-
 ### Symptom inventory
 
 - Subscribed user opens the SPA after a few days → "refresh failed" toast,
@@ -44,268 +43,409 @@ fires.
 - New enroll → SPA appears to work but its stored token is already dead. Any
   refresh attempt the SPA makes fails until the user re-OAuths.
 
+### Pre-existing related bugs (incidentally fixed by this migration)
+
+These were surfaced while planning the migration; fixes ride along.
+
+- `routes/oauth.js:42` `/api/oauth/app/refresh` omits `client_secret`. The
+  refresh-token grant for confidential clients requires it. Works today only
+  because Tesla's first-party client config tolerates it; not guaranteed.
+  This route is deleted in this migration, so the bug evaporates — but the
+  new `getTeslaAccess` helper MUST include `client_secret` on its refresh
+  exchanges (call out explicitly in phase 2).
+- `notifications.js:51` `/enable` exchanges the user's refresh_token to
+  validate it, then continues with the loop. A crash between exchange and
+  the eventual `saveSubs` call loses the rotated token entirely. Fixed
+  by routing the validation through `getTeslaAccess`, which persists
+  before returning.
+- Cron / route handlers don't differentiate `invalid_grant` (real revocation)
+  from 5xx / network blip. A single Tesla 502 mass-invalidates today. Fixed
+  by classifying refresh-failure responses (see phase 2).
+
 ## Target architecture
 
-The server is the **sole owner** of every Tesla token. The SPA carries only a
-server-issued session cookie.
+The server is the **sole owner** of every Tesla token. One canonical
+refresh_token per user, in one store, accessed via one helper.
 
 ```
-┌─ Browser (SPA) ──────────┐         ┌─ Server (express) ──────────────┐
-│  localStorage: nothing   │         │  sessions/<id>.json:            │
-│    tesla-related         │         │    refresh_token (Tesla)        │
-│  cookie:                 │ <─────> │    access_token  (Tesla, cached)│
-│    session=<HMAC>;       │  HTTPS  │    access_expires_at            │
-│    HttpOnly; Secure;     │  +cookie│    slack_user_id (optional)     │
-│    SameSite=Strict       │         │    created_at, last_seen_at     │
-└──────────────────────────┘         │                                 │
-                                     │  subscriptions.json:            │
-                                     │    refresh_token (sub-owned;    │
-                                     │      separate from session,     │
-                                     │      survives logout)           │
-                                     │                                 │
-                                     │  getTeslaAccess(sessionId|subId)│
-                                     │    → access_token, refreshing   │
-                                     │      from refresh_token if      │
-                                     │      cached access has expired  │
-                                     └─────────────────────────────────┘
+┌─ Browser (SPA) ─────────┐         ┌─ Server (express) ──────────────┐
+│  localStorage: nothing  │         │                                 │
+│  cookie:                │ <─────> │  data/users.json (single store):│
+│    session=<id>;        │  HTTPS  │    {                            │
+│    HttpOnly; Secure;    │  +cookie│      id: "<user uuid>",         │
+│    SameSite=Lax         │         │      session_cookie_id: "<32B>",│
+└─────────────────────────┘         │      refresh_token: "<tesla>",  │
+                                    │      access_token: "<tesla>",   │
+            ┌─ Cron (in same proc) ─┐│      access_expires_at: ts,    │
+            │ noon ET, walks         ││      slack_user_id?: "U...",  │
+            │ subscribed users       ││      vehicle_id?: "...",      │
+            │ via getTeslaAccess(id) ││      vehicle_name?: "...",    │
+            └────────────────────────┘│      consecutive_failures: 0, │
+                                    │      last_check_at, ...         │
+                                    │    }                            │
+                                    │                                 │
+                                    │  getTeslaAccess(userId):        │
+                                    │    used by cron AND every       │
+                                    │    SPA-driven route. Single     │
+                                    │    code path. In-process        │
+                                    │    single-flight per userId.    │
+                                    └─────────────────────────────────┘
 ```
 
-Two distinct stores because they have different lifecycles:
+### One record per user, two orthogonal feature flags
 
-- **Sessions** are interactive — created by OAuth, destroyed by logout, expire
-  after N days of inactivity. Used by SPA-driven calls.
-- **Subscriptions** are background — created by `/api/notifications/enable`,
-  destroyed by `/api/notifications/disable`, refreshed daily by the cron
-  whether the user is logged in or not.
+A user record can be in any of four states:
 
-A session and a subscription that belong to the same user hold two independent
-refresh_tokens. They rotate independently and never collide because they're
-never used in parallel against the same Tesla account state — Tesla allows
-multiple active refresh_tokens per OAuth grant.
+| `session_cookie_id` set? | `slack_user_id` + `vehicle_id` set? | Meaning |
+|--|--|--|
+| yes | yes | logged in + subscribed |
+| yes | no | logged in only (browsing, hasn't subscribed) |
+| no | yes | subscribed only (cron keeps DMing; user logged out but still wants pings) |
+| no | no | dead record, prune candidate |
 
-(If this assumption turns out false in practice, the fallback is to make the
-sub copy the session's token at enroll time and keep them shared — which is
-just today's problem moved to the cron, and we're back where we started. Need
-to confirm with a quick experiment in phase 1.)
+The cron iterates records where the slack/vehicle fields are set, regardless
+of cookie state. The SPA-driven routes look up records by `session_cookie_id`.
+Logout clears the cookie field; disable clears the slack/vehicle fields. When
+both are clear, the record is pruned on the next daily prune pass.
+
+### One code path for SPA + cron
+
+```js
+// src/server/integrations/tesla-auth.js
+async function getTeslaAccess(userId)
+//   1. Load user record. 404 if not found.
+//   2. If access_token cached + expires_at > now+2min → return cached.
+//   3. Else exchange refresh_token (with client_secret), classify response:
+//      - 200: persist {access_token, refresh_token, expires_at}, return token.
+//      - 4xx invalid_grant: persist {refresh_invalidated_at: now}, throw RevokedError.
+//      - other 4xx (invalid_request, invalid_client): throw ConfigError (don't invalidate).
+//      - 5xx / network: don't persist, throw TransientError. Caller retries.
+//   4. In-process single-flight: per-userId Map of in-flight refresh promises so
+//      two callers in the same tick share one Tesla round-trip.
+```
+
+Both callers go through this helper:
+
+- **SPA route**: middleware reads cookie → `userId` → `getTeslaAccess(userId)` → uses access_token to call Tesla.
+- **Cron**: iterates subscribed user records → `getTeslaAccess(record.id)` → uses access_token.
+
+Same helper, same rotation logic, same single-flight, same retry classification.
+**No duplicated token-handling code anywhere.**
 
 ## Implementation phases
 
-Each phase is independently shippable, with feature flags or coexistence so
-nothing breaks mid-migration. Existing users keep working through every phase.
+Each phase is independently shippable, with backwards-compat coexistence so
+existing flows don't break mid-migration.
 
-### Phase 1 — Verify Tesla allows two active refresh_tokens per grant
+### Phase 1 — Schema migration: subscriptions.json → users.json
 
-**Spike, ~30 min.** Manually OAuth twice in two browser windows; confirm both
-returned refresh_tokens stay valid in parallel through one rotation each.
-
-If true: proceed with the plan as written.
-If false: scope changes — sessions and subscriptions must share the token,
-which means we still have a single-owner constraint and the cron has to be
-the only refresher. Doable, but the migration looks different (session
-becomes a thin wrapper that asks the cron's store for an access_token).
-
-Document the finding in this doc before proceeding.
-
-### Phase 2 — Server-side session store
-
-Add a new `data/sessions.json` (mode 0600), atomic-write-via-rename like
-`subscriptions.json`. Schema:
+Rename `data/subscriptions.json` → `data/users.json` and add the new fields.
+Existing records gain default values:
 
 ```json
-{
-  "sessions": [{
-    "id": "<32 base64url bytes>",
-    "refresh_token": "<tesla>",
-    "access_token": "<tesla, cached>",
-    "access_expires_at": "<ISO ts>",
-    "slack_user_id": "U060NLFUM",
-    "slack_session": "<existing HMAC, optional>",
-    "created_at": "<ISO ts>",
-    "last_seen_at": "<ISO ts>"
-  }]
-}
+// before:
+{ "subscriptions": [{ "id":"...", "slack_user_id":"...", "vehicle_id":"...",
+                       "vehicle_name":"...", "refresh_token":"..." }] }
+
+// after:
+{ "users": [{ "id":"...", "session_cookie_id": null,
+              "refresh_token": "...", "access_token": null,
+              "access_expires_at": null,
+              "slack_user_id":"...", "vehicle_id":"...", "vehicle_name":"...",
+              "consecutive_failures":0, ... existing fields preserved
+              }] }
 ```
 
-New module: `src/server/store/sessions.js` exporting `loadSession(id)`,
-`createSession(payload)`, `updateSession(id, patch)`, `deleteSession(id)`,
-`pruneInactive(maxAgeDays)`. Same atomic-write + corrupt-aside discipline as
-`subscriptions.js`.
+A startup migration in `src/server/store/users.js` reads the old file if
+present, transforms in-place, writes the new file, leaves the old file
+renamed to `.subscriptions.json.pre-bff` as a safety net.
 
-Add a `pruneInactive` call to the existing daily cron — drop sessions whose
-`last_seen_at` is older than 30 days.
+The new module exports the same surface plus a couple of helpers:
+`loadStore`, `saveStore`, `loadUsers`, `loadUserById`, `loadUserBySession`,
+`loadUserBySlackId`, `patchUser`, `createUser`, `deleteUser`, `pruneOrphaned`.
 
-### Phase 3 — `getTeslaAccess(sessionId)` helper
+### Phase 2 — `getTeslaAccess` helper + retry classification
 
-New module: `src/server/integrations/tesla-auth.js` exporting:
+New module: `src/server/integrations/tesla-auth.js`. Implements the helper
+described above. **Includes `client_secret` on every refresh exchange** (fixes
+the carry-forward bug from `oauth.js:42`).
+
+Refresh-failure classification (Tesla returns RFC 6749 error codes in the
+JSON body):
 
 ```js
-async function getTeslaAccess(sessionOrSub)
-// Returns { access_token, sessionInvalidated: false }
-// If access_expires_at is >2min away, return cached access_token.
-// Otherwise refresh: exchange refresh_token, persist new tokens,
-//   bump access_expires_at, return new access_token.
-// If refresh fails (401), mark session as invalidated and return
-//   { sessionInvalidated: true } so the caller can 401 the SPA.
+// status 200 → success
+// status 4xx body.error === 'invalid_grant' → revoked, persist refresh_invalidated_at
+// status 4xx other → ConfigError, log loudly, don't touch token
+// status 5xx or network throw → TransientError, don't touch token, caller retries
 ```
 
-In-process serialization (single-flight per session id) so two parallel
-requests for the same session don't double-refresh and race.
+Caller-side retry policy (in `getTeslaAccess`): up to 3 attempts on
+TransientError with 500ms between, then propagate. Matches the overpass
+retry pattern.
 
-### Phase 4 — New auth endpoints
+### Phase 3 — Convert cron to use `getTeslaAccess`
+
+`src/server/notifications/cron.js` currently inline-exchanges via
+`teslaTokenExchange` at line 49 and persists via `patchSub` at line 54.
+Replace with:
+
+```js
+const access = await getTeslaAccess(user.id);
+// access is the cached or freshly-rotated token, persistence already happened
+const headers = { Authorization: `Bearer ${access}`, ... };
+const locData = await fetchVehicleData(headers, user.vehicle_id);
+```
+
+The crash-mid-rotation bug fixes itself — `getTeslaAccess` persists before
+returning, so the rest of the cron loop can crash without losing the rotation.
+
+Stub-vehicle short-circuit unchanged.
+
+### Phase 4 — Add session cookie machinery
+
+Add `cookie-parser` middleware in `src/server/app.js`.
+
+New module: `src/server/store/sessions.js` is **not** added — sessions are a
+field on the user record, not a separate store.
+
+Add session helpers in `src/server/util/session.js`:
+```js
+mintSessionCookieId()   // crypto.randomBytes(32).toString('base64url')
+readSessionCookie(req)  // req.cookies.session
+setSessionCookie(res, id)   // Set-Cookie: session=...; HttpOnly; Secure;
+                            //   SameSite=Lax; Path=/sweeper/; Max-Age=2592000
+clearSessionCookie(res)
+```
+
+`SameSite=Lax` rather than `Strict`: Strict drops the cookie on the OAuth
+return-redirect from `auth.tesla.com`, breaking the callback. Lax preserves
+the cookie on top-level navigations including OAuth redirects, while still
+blocking cross-origin POST attacks. Path is scoped to `/sweeper/` so other
+apps on `claw.bitvox.me` don't see the cookie.
+
+### Phase 5 — New auth endpoints
 
 ```
 POST /api/session/create
   body: { code, state }   # tesla OAuth code, server-side state
-  effect: exchange code → tokens, mint sessionId, write session record
-  response: 200, Set-Cookie: session=<sessionId>; HttpOnly; Secure;
-            SameSite=Strict; Max-Age=2592000  (30d)
-            body: { vehicles: [...] }  # convenience: SPA needs the list anyway
+  effect: exchange code → tokens, find-or-create user record by tesla user id
+          (extracted from id_token claims), bind session_cookie_id, set cookie
+  response: 200, body: { vehicles: [...] }  # SPA needs the list anyway
 
 POST /api/session/destroy
   cookie: session=<id>
-  effect: deleteSession(id), instruct browser to clear cookie
-  response: 204, Set-Cookie: session=; Max-Age=0
+  effect: clear session_cookie_id on the user record (sub fields preserved
+          if present), clear cookie
+  response: 204
 
 GET /api/session/me
   cookie: session=<id>
   response: { authenticated: bool, slack_user_id: string|null,
-              vehicles_cached_at?: ISO ts }
-  # Lightweight check the SPA can call on mount to know if a session
-  # exists without paying for a tesla round-trip.
+              vehicle_id: string|null, vehicle_name: string|null }
+  # Lightweight bootstrap for the SPA on mount.
 ```
 
-Existing `/api/oauth/app/start` and `/api/oauth/app/callback` stay for the
-OAuth handshake (they already return the `code` to the SPA via the redirect,
-which the SPA then POSTs to `/api/session/create`).
+Existing `/api/oauth/app/start` stays (mints state + builds Tesla URL). The
+existing `/api/oauth/app/callback` is replaced by `/api/session/create` —
+they do the same thing except the new one binds a cookie and the old one
+returned tokens to the SPA.
 
-`/api/oauth/app/refresh` is **deleted** — no caller will need it.
+`/api/oauth/app/refresh` is **deleted** — no caller will exist.
 
-### Phase 5 — Convert tesla-touching routes to session auth
+**User identity matching**: when a user re-OAuths after logout (or on a new
+device), `/session/create` extracts the tesla account id from the OIDC
+`id_token` claims, looks up an existing user record by that, and reuses it
+(replacing `refresh_token` + `session_cookie_id` with the new values).
+This way one tesla account always maps to one record, no duplicates.
 
-For each existing route that currently takes a `token` body field, replace
-with cookie-based session lookup:
+If the id_token doesn't include a stable account id (Tesla's OIDC
+implementation may vary), fallback is to use the access_token to call
+`/api/1/users/me` and key on that response. Confirm during phase 5.
 
-- `POST /api/vehicles` — body becomes `{}`. Server reads cookie → `getTeslaAccess` → calls Tesla. Returns `{ vehicles: [...] }` as before.
-- `POST /api/check` — body becomes `{ vehicle_id? }`. Same lookup pattern. Stub-vehicle short-circuit unchanged.
-- `POST /api/reverse-geocode` — no auth needed (public Nominatim wrapper, just lat/lng validation). No change.
-- `POST /api/notifications/enable` — body becomes `{ vehicle_id, vehicle_name }` only. Pulls refresh_token from session, copies it into the new sub record (the sub keeps its own copy). The HMAC `slack_user_id` + `session` field are still required separately for the confused-deputy gate (slack ownership proof is orthogonal to tesla session).
-- `POST /api/notifications/disable` — unchanged (still HMAC-gated by slack session).
-- `POST /api/notifications/run` — unchanged (bearer-token auth for cron debug, no tesla session needed).
+### Phase 6 — Convert tesla-touching routes to session auth
+
+For each existing route taking a `token` body field:
+
+- `POST /api/vehicles` — body becomes `{}`. Read cookie → `getTeslaAccess(userId)` → call Tesla.
+- `POST /api/check` — body becomes `{ vehicle_id? }`. Same. Stub-vehicle short-circuit unchanged.
+- `POST /api/reverse-geocode` — no auth needed (public Nominatim wrapper). No change.
+- `POST /api/notifications/enable` — body becomes `{ vehicle_id, vehicle_name, slack_user_id, slack_session }`. Pulls refresh_token from the user record (already there from `/session/create`). Sets the slack/vehicle fields on the same record. Slack HMAC session is still required for the confused-deputy gate.
+- `POST /api/notifications/disable` — clears the slack/vehicle fields on the user record. HMAC-gated.
+- `POST /api/notifications/run` — unchanged (bearer-token cron debug).
 - `GET /api/notifications/status` — unchanged.
 
-**Backwards compat for one release**: each tesla-touching route accepts EITHER a session cookie OR a `token` body field. If both are present, prefer the cookie. This lets the SPA migrate independently of the server, and lets the cron's standalone `/api/notifications/run` keep working.
+**Multi-vehicle scenario** (R1 P2 #7): `/enable` now writes the slack/vehicle
+fields onto the existing user record. If the user enables for vehicle A then
+later enables for vehicle B, the second call overwrites the first. **One
+sub per user**, deliberately. Multi-vehicle support is a separate feature and
+out of scope (see Out of scope).
 
-After SPA migration ships and a couple of weeks pass with no fallback hits in logs, remove the `token` body acceptance.
+**Backwards compat for one release**: each tesla-touching route accepts EITHER
+a session cookie OR a `token` body field. Cookie wins. This lets the SPA
+migrate independently of the server.
 
-### Phase 6 — SPA migration
+After SPA migration ships and a couple of weeks pass with no fallback hits in
+logs, remove the `token` body acceptance.
+
+### Phase 7 — SPA migration
 
 In `src/client/`:
 
-- Drop `localStorage['tesla_tokens']` entirely. Never read or write it again. Remove the migration code that reads stale entries (or leave a one-time `localStorage.removeItem('tesla_tokens')` cleanup in `main.jsx`).
-- Drop the `refreshToken` callback and the 60s polling effect that watches `expires_at`. Both become server concerns.
-- OAuth callback handler (`useEffect` at `App.jsx:423`): instead of POSTing `{code}` to `/api/oauth/app/callback`, POST `{code, state}` to `/api/session/create`. Response sets the session cookie. SPA records "logged in" state from the response body (vehicles list).
+- Drop `localStorage['tesla_tokens']` entirely. Add a one-time
+  `localStorage.removeItem('tesla_tokens')` cleanup in `main.jsx` for
+  hygiene.
+- Drop the `refreshToken` callback (`App.jsx:225`) and the 60s polling
+  effect (`App.jsx:228-249`). Both become server concerns.
+- OAuth callback handler (`App.jsx:423`): instead of POSTing `{code}` to
+  `/api/oauth/app/callback`, POST `{code, state}` to `/api/session/create`.
+  Response sets the session cookie via Set-Cookie header. SPA records
+  "logged in" state from the response body (vehicles list).
 - Add `/api/session/me` call on mount to detect existing session.
-- All existing API calls drop the `token` body field. They include the cookie automatically (same-origin).
-- Logout button calls `/api/session/destroy`.
+- All existing API calls drop the `token` body field. They include the
+  cookie automatically (same-origin).
+- Add `credentials: 'include'` to every `fetch` call in `lib/api.js` so the
+  cookie rides along (required for fetch even on same-origin in some browser
+  configurations).
+- Logout button calls `/api/session/destroy`, then SPA clears its in-memory
+  state.
 - 401 handling: on any 401 with `{ session_expired: true }`, redirect to OAuth start.
 
-The `tokens` state object goes away. The `transientToast` + `oauthStatus` split stays. The Slack session HMAC flow is unchanged (orthogonal to tesla).
-
-### Phase 7 — Migrate existing subscriptions
-
-Existing subs in `subscriptions.json` already have their own refresh_token —
-nothing to migrate on the cron side. They keep working untouched.
-
-Existing browsers with stale `localStorage['tesla_tokens']`: on first load
-post-migration, the SPA detects no session cookie and either prompts OAuth
-or (nicer) tries `/api/session/me` first to confirm and shows a "log in"
-button. Either way, no breakage — the user re-OAuths once.
+The `tokens` state object goes away. The `transientToast` + `oauthStatus`
+split stays. The Slack session HMAC flow is unchanged (orthogonal to tesla).
 
 ### Phase 8 — Remove the backwards-compat `token` body acceptance
 
 After ~2 weeks with no fallback hits in logs, remove the `token` body field
-support from every route. SPA must use session cookie.
+support from every route. Update tests.
 
-Update tests to match.
+Delete the `.subscriptions.json.pre-bff` safety-net file from disk.
 
 ## Concrete file changes (estimate)
 
 | File | New / Modified | Lines (rough) |
 |------|----------------|---------------|
-| `src/server/store/sessions.js` | NEW | ~80 |
-| `src/server/integrations/tesla-auth.js` | NEW | ~60 |
+| `src/server/store/users.js` (renamed from subscriptions.js, schema migration) | MODIFIED | +60 / -10 |
+| `src/server/integrations/tesla-auth.js` | NEW | ~80 |
+| `src/server/util/session.js` | NEW | ~30 |
 | `src/server/routes/session.js` | NEW | ~80 |
-| `src/server/app.js` | mount session router + `cookie-parser` middleware | +5 |
-| `src/server/routes/vehicles.js` | session auth, drop body token | ~30 changes |
-| `src/server/routes/notifications.js` | drop refresh_token from /enable body | ~20 changes |
-| `src/server/routes/oauth.js` | delete `/api/oauth/app/refresh`, keep start/callback | -25 |
-| `src/server/notifications/cron.js` | optionally use `getTeslaAccess` for code share | +10 / unchanged |
-| `src/client/App.jsx` | drop tokens state, drop refreshToken, drop polling effect, switch endpoints | -80 |
-| `src/client/lib/api.js` | add `credentials: 'include'` to fetch calls | +1 line per call |
-| Tests for sessions, tesla-auth, session routes | NEW | ~150 |
-| `docs/bff-token-ownership-plan.md` | NEW (this doc) | (here) |
+| `src/server/app.js` | mount session router + `cookie-parser` | +5 |
+| `src/server/routes/vehicles.js` | session auth, drop body token (with compat) | ~30 changes |
+| `src/server/routes/notifications.js` | drop refresh_token from /enable body, write to user record | ~30 changes |
+| `src/server/routes/oauth.js` | delete `/api/oauth/app/refresh`; keep start, redirect callback to /session/create | -25 |
+| `src/server/notifications/cron.js` | replace inline exchange with `getTeslaAccess` | ~15 changes |
+| `src/client/App.jsx` | drop tokens state + refreshToken + polling effect; switch endpoints; cookie-aware fetch | -80 / +20 |
+| `src/client/lib/api.js` | add `credentials: 'include'` | +1 line per call |
+| Tests (users + tesla-auth + session routes + retry classifier) | NEW | ~200 |
+| `package.json` | add `cookie-parser` dep | +1 |
 
-Net: roughly +250 / -100 lines, plus the doc. ~5-6 hours of focused work
-spread across the phases.
+Net: roughly +400 / -130 lines. ~6-8 hours of focused work spread across
+phases 1-8.
 
 ## Test plan
 
-New tests (pre-existing tests guard everything else):
+New tests:
 
-- `sessions.test.js` — create/load/update/delete/prune, atomic write, corrupt-aside.
+- `users.test.js` — schema migration from old `subscriptions.json`, atomic
+  write, find-or-create by tesla account id, bind/clear cookie, prune
+  orphaned records.
 - `tesla-auth.test.js` — cached access_token returned within 2min window;
-  expiry triggers refresh; refresh failure marks session invalidated; concurrent
-  callers single-flight (no double rotation).
+  expiry triggers refresh; refresh failure classification (200 / invalid_grant
+  / 5xx); concurrent callers single-flight (no double rotation); retry
+  policy (3 attempts on transient).
 - `session-routes.test.js` — `/api/session/create` sets cookie correctly,
-  `/me` returns shape, `/destroy` clears cookie.
-- Update `routes.test.js` `/api/vehicles` and `/api/check` to use the new
-  cookie-based auth; keep the legacy `token` body assertions until phase 8.
+  matches existing user by tesla account id, `/me` returns correct shape,
+  `/destroy` clears cookie + session field but preserves sub fields.
+
+Update existing:
+
+- `routes.test.js` `/api/vehicles` and `/api/check` switch to cookie-based
+  auth in primary tests; keep one `token`-body assertion until phase 8 to
+  cover the compat path.
+- `notifications-cron.test.js` swap `teslaTokenExchange` mocks for
+  `getTeslaAccess` mocks.
 
 ## Risks + rollback
 
-**Risk: Tesla rejects the second active refresh_token.** Mitigation: phase 1
-spike. If Tesla enforces single-owner, we collapse sessions and subs into a
-shared store with a single canonical refresh_token, and the cron becomes the
-sole refresher (sessions just read the shared store).
+**Risk: Tesla refresh_token rotation race between cron + an active SPA
+request.** Both go through `getTeslaAccess` with in-process single-flight per
+user-id, so two simultaneous calls share one Tesla round-trip. As long as
+they're in the same Node process (which they are — cron runs in-process), no
+collision. If we ever split the cron into a separate process, the helper
+needs to grow file-based locking — call out in the helper's comment so a
+future maintainer doesn't lose context.
 
-**Risk: Cookie + CORS pain.** SPA + server are same-origin under
-`https://claw.bitvox.me/sweeper/` so CORS doesn't apply. SameSite=Strict +
-HttpOnly + Secure cookies are the simple case.
+**Risk: SameSite=Lax + OAuth redirect.** Lax sends the cookie on top-level
+GET navigations from cross-origin (which Tesla's redirect IS), so the SPA
+boots with the cookie present. Verified during phase 4 by manual OAuth.
 
-**Risk: Migration breaks existing logged-in browsers.** Phase 5's backwards-
-compat (accept either cookie OR body token) covers this — old SPAs keep
-working until they refresh and pull the new bundle.
+**Risk: Cookie path scoping.** Cookie set with `Path=/sweeper/` so other
+apps on `claw.bitvox.me` (cowgame, transcripts, etc.) don't see it. SPA is
+served from `/sweeper/` so the cookie scope matches.
 
-**Risk: Session store grows unbounded.** Mitigated by phase 2's
-`pruneInactive(30d)` daily call. Should stay under a few KB at our scale.
+**Risk: User identity matching for find-or-create.** If Tesla's OIDC
+id_token doesn't include a stable user id, falls back to `/api/1/users/me`
+in phase 5. Confirm during implementation; if neither works, fall back to a
+"create new record per OAuth, prune duplicates daily" model.
 
-**Risk: Stuck single-flight in `getTeslaAccess`.** A hung refresh blocks all
-subsequent requests for that session until timeout. Use the existing
-`fetchWithTimeout` (12s) and track per-session promises, not a global lock —
-one slow user can't starve others.
+**Risk: Refresh-failure mass-invalidation during a Tesla outage.** Mitigated
+by phase 2's retry classification — only `invalid_grant` invalidates; 5xx
+retries 3× then leaves the record intact for the next attempt. Without this
+fix, a 502 wave would nuke every record.
+
+**Risk: Tesla grant expiry at 90 days regardless of rotation.** A user
+record's refresh_token can age out even with daily rotation. After expiry,
+all refresh attempts return `invalid_grant` and the record gets the
+`refresh_invalidated_at` flag. UX: the SPA shows "session expired, re-login"
+on next page load; the cron's stuck-DM fires after 3 consecutive failures
+(existing flow). **Add a server log line whenever a refresh hits
+`invalid_grant`** so we can grep for "users about to need re-OAuth."
+
+**Risk: Migration breaks existing logged-in browsers.** Phase 6's
+backwards-compat (cookie OR body token) covers this. Existing SPAs keep
+working until they pull the new bundle.
+
+**Risk: Session store grows unbounded.** Daily prune pass drops records
+where `session_cookie_id` is null AND slack/vehicle fields are empty AND
+`last_seen_at > 30d`. Should stay under a few KB at our scale.
 
 **Rollback story.** Each phase is independently revertable:
-- Phase 2-3 (new modules): orphan code, no impact on existing flows.
-- Phase 4 (new endpoints): new routes, no callers yet.
-- Phase 5 (backwards-compat routes): existing SPAs keep working via body token.
-- Phase 6 (SPA migration): if it goes wrong, revert the one frontend commit and rebuild.
+- Phase 1 (schema rename): the `.pre-bff` safety-net file is preserved; restore by `mv` and revert the commit.
+- Phase 2-4 (new modules + cookie infra): orphan code, no impact on existing flows.
+- Phase 5 (new endpoints): new routes, no callers yet.
+- Phase 6 (backwards-compat routes): existing SPAs keep working via body token.
+- Phase 7 (SPA migration): if it goes wrong, revert the one frontend commit and rebuild.
 - Phase 8 (remove compat): if removed too eagerly, restore from git.
 
 ## Out of scope
 
-- Multi-tesla-account-per-user. Today one session = one refresh_token = one tesla account. Multi-account is a separate feature.
-- Single-sign-on across devices. A user with two browsers gets two sessions, each with its own refresh_token. Fine, since Tesla allows multiple grants.
-- Server-side encryption-at-rest of session tokens. Filesystem mode 0600 + ec2-user ownership is the same protection refresh_tokens have today in `subscriptions.json`. Add fde or a key wrap if/when we host secrets we're not willing to lose to a single compromised box.
+- **Multi-vehicle subscription per user.** Today's `subscriptions.json`
+  technically supports it (one row per `(slack_user_id, vehicle_id)` pair).
+  The new `users.json` collapses to one sub per user; enrolling a second
+  vehicle overwrites the first. Restoring multi-vehicle is a separate
+  feature — make `vehicle_id`/`vehicle_name`/etc into an array or a
+  per-vehicle subdoc. Won't change the token model.
+- **Server-side encryption-at-rest of session/refresh tokens.** Filesystem
+  mode 0600 + ec2-user ownership matches today's protection.
+- **Server-side state-store reuse across processes.** Single-flight is in-
+  process only. Adding a second process (separate cron worker, web cluster,
+  etc.) requires file/db locking. Document in the helper.
+- **Stable user identity if Tesla's OIDC id_token lacks a user id.** Falls
+  back to `/api/1/users/me` lookup; if that also fails, accept duplicate
+  records and prune later.
+- **Audit logging.** Worth adding a basic `[session] created/destroyed/
+  refreshed/invalidated` log line in phase 4-5, but a structured audit log
+  with retention is out of scope.
 
 ## Phase ordering rationale
 
-Why this order and not "rip the band-aid off":
+1. Phase 1 (schema migration) lays the data shape; everything else depends on it.
+2. Phases 2-4 are additive — no caller changes, modules accumulate.
+3. Phase 3 (cron uses `getTeslaAccess`) is the smallest behavior change and surfaces any helper bugs early.
+4. Phase 5 (new endpoints) adds new routes without removing old ones.
+5. Phase 6's coexistence (cookie OR body) is the key risk-reducer.
+6. Phase 7 is the only phase that touches user-visible behavior, reversible from a single commit.
+7. Phase 8 is cleanup, post-observation.
 
-1. The phase 1 spike is cheap and decides whether the whole plan is viable.
-2. Phases 2-4 are additive — old code keeps working, new code accumulates.
-3. Phase 5's coexistence (cookie OR body) is the key risk-reducer — it lets SPA and server migrate on independent timelines.
-4. Phase 6 is the only phase that touches user-visible behavior, and it's reversible from a single commit.
-5. Phase 8 is cleanup, low-risk, after observation confirms no fallback.
-
-If at any phase the plan starts feeling wrong, we stop. The codebase keeps the
-new modules around as orphans and the existing flow keeps working.
+If at any phase the plan starts feeling wrong, we stop. The codebase keeps
+the new modules around as orphans and the existing flow keeps working.
