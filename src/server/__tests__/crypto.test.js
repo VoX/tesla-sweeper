@@ -108,7 +108,13 @@ describe('session cookie helpers (util/session.js)', () => {
 
   it('readSessionCookie returns null on a forged/tampered cookie', () => {
     const { signed } = mintSessionId();
-    expect(readSessionCookie({ cookies: { session: signed.slice(0, -1) + 'X' } })).toBeNull();
+    // Flip the FIRST base64url char of the sid — full 6 meaningful bits,
+    // so the decoded value definitely changes (the last char of a 32-byte
+    // digest carries 2 don't-care padding bits, so flipping it can be a
+    // no-op at the byte level — that made an earlier `slice(0,-1)+'X'`
+    // form flake ~1/16 runs).
+    const tampered = (signed[0] === 'A' ? 'B' : 'A') + signed.slice(1);
+    expect(readSessionCookie({ cookies: { session: tampered } })).toBeNull();
     expect(readSessionCookie({ cookies: { session: 'not-even-signed' } })).toBeNull();
   });
 });

@@ -289,15 +289,20 @@ export default function App() {
   // the vehicle list, and run the gentle auto-check. Skipped when we're
   // returning from an OAuth redirect (handled by the ?code= effect).
   const checkSession = useCallback(async () => {
-    let me;
-    try { me = await get('session/me'); } catch { me = { authenticated: false }; }
-    if (me.authenticated) {
-      setLoggedIn(true);
-      if (me.slack_user_id) setSlackUserId(me.slack_user_id);
-      const vlist = await fetchVehicles();
-      autoCheckOnLoad(vlist);
+    try {
+      const me = await get('session/me').catch(() => ({ authenticated: false }));
+      if (me.authenticated) {
+        setLoggedIn(true);
+        if (me.slack_user_id) setSlackUserId(me.slack_user_id);
+        // fetchVehicles handles a 401 itself (→ handleAuthExpired). A
+        // non-401 (5xx / network) shouldn't strand the SPA on the
+        // "checking…" gate — surface it and let the user retry/reload.
+        const vlist = await fetchVehicles().catch(e => { setError(e?.message || 'Could not load your vehicles'); return []; });
+        autoCheckOnLoad(vlist);
+      }
+    } finally {
+      setAuthChecked(true);
     }
-    setAuthChecked(true);
   }, [autoCheckOnLoad]);
 
   // 300ms trailing debounce so a flurry of drag-releases (drag, drop,

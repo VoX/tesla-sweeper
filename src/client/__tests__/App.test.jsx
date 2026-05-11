@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, cleanup, fireEvent } from '@testing-library/preact';
+import { render, cleanup, fireEvent } from '@testing-library/preact';
 
 // Mock the lazy leaflet loader so MapView can render in tests without
 // hitting the real Leaflet dynamic import.
@@ -69,7 +69,6 @@ describe('App', () => {
       'session/me': { authenticated: true, slack_user_id: null, vehicle_id: null, vehicle_name: null },
       '/api/vehicles': { vehicles: [] },
     };
-    installFetch();
     const App = await importApp();
     const { container } = render(<App />);
     await tick();
@@ -88,7 +87,6 @@ describe('App', () => {
         { id: '999999999999999', name: 'Test Vehicle', vin: 'V2', state: 'online', is_stub: true },
       ] },
     };
-    installFetch();
     const App = await importApp();
     const { container } = render(<App />);
     await tick();
@@ -105,7 +103,6 @@ describe('App', () => {
       '/api/vehicles': { vehicles: [{ id: '111', name: 'Car', vin: 'V', state: 'asleep' }] },
       'notifications/status': { subscriptions: [] },
     };
-    installFetch();
     const App = await importApp();
     const { container } = render(<App />);
     await tick();
