@@ -131,11 +131,11 @@ npm run build  # Production build to dist/ (includes brotli .br siblings + inlin
 npm start      # Express serves dist/ in production
 ```
 
-Vite proxies `/sweeper/api/*` to `localhost:20040` in dev mode. The React-style code uses `preact/hooks` — make sure new text inputs use `onInput` not `onChange` (preact's onChange fires on blur, not per keystroke).
+Vite proxies `/api/*` to `localhost:20040` in dev mode. The React-style code uses `preact/hooks` — make sure new text inputs use `onInput` not `onChange` (preact's onChange fires on blur, not per keystroke).
 
 ## Common Pitfalls
 
-- **Relative API paths:** Frontend fetch calls use `api/...` not `/api/...`. Caddy strips `/sweeper/`, so absolute paths 404 from the public URL.
+- **API paths:** Frontend fetch calls use `/api/...` (absolute path, same-origin under `sweeper.bitvox.me`). The old `/sweeper/api` ternary in `lib/api.js` was removed in the BFF migration — there's no path-prefix dance now.
 - **Token endpoint domain:** Use `fleet-auth.prd.vn.cloud.tesla.com` for token exchange, NOT `auth.tesla.com`.
 - **Content-Type for tokens:** Tesla requires `application/x-www-form-urlencoded`, not JSON.
 - **Leaflet popup XSS:** Use `textContent`/`createTextNode` for popup content; never template strings with `bindPopup`. Street names come from Nominatim and are untrusted.

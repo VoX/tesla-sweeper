@@ -1,12 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Mock everything the cron touches; the test exercises mode validation,
-// single-flight behavior, and stub-vehicle short-circuit logic.
+// Mock everything the cron touches; the tests exercise mode validation,
+// the stub-vehicle short-circuit, the real (getTeslaAccess) vehicle path,
+// dispatch/dedup, and single-flight behavior.
 
-vi.mock('../store/subscriptions.js', () => ({
+vi.mock('../store/users.js', () => ({
   loadStore: vi.fn(),
   saveStore: vi.fn(),
-  patchSub: vi.fn(),
+  patchUser: vi.fn(),
+  loadSubscribedUsers: vi.fn(),
 }));
 
 vi.mock('../integrations/tesla.js', () => ({
@@ -14,8 +16,11 @@ vi.mock('../integrations/tesla.js', () => ({
   STUB_REFRESH_TOKEN: 'STUB_REFRESH_TOKEN',
   STUB_VEHICLE_LAT: 42.385,
   STUB_VEHICLE_LNG: -71.108,
-  teslaTokenExchange: vi.fn(),
   fetchVehicleData: vi.fn(),
+}));
+
+vi.mock('../integrations/tesla-auth.js', () => ({
+  getTeslaAccess: vi.fn(),
 }));
 
 vi.mock('../integrations/nominatim.js', () => ({
@@ -28,29 +33,43 @@ vi.mock('../integrations/slack.js', () => ({
   postSlackDM: vi.fn().mockResolvedValue({ ok: true }),
 }));
 
+// Use a sweep-event date 2 days in the future from "today" (in ET) so the
+// planner's window filter (`d >= 0 && d <= 7`) accepts it AND
+// `shouldDispatchPlan` (1 ≤ daysUntilPrimary ≤ 3) fires. Hard-coded dates
+// drift past the window as wall-clock advances.
+const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+const inDays = (n) => {
+  const d = new Date(todayET + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
 vi.mock('../sweep/check.js', () => ({
-  runSweepCheck: vi.fn().mockResolvedValue({
-    found: true, days_until_next: 1, status: 'warning', title: 'Move', message: 'tomorrow',
-    car_side: 'even', sweep_events: [{ date: '2026-05-09', side: 'even', time: '8:00 AM - 12:00 PM' }],
-    side_detection: { side: 'even', car_house_number: 12 },
-    house_num: 12, latitude: 42.385, longitude: -71.108,
-  }),
+  runSweepCheck: vi.fn(),
 }));
+const { runSweepCheck } = await import('../sweep/check.js');
+runSweepCheck.mockResolvedValue({
+  found: true, days_until_next: 2, status: 'warning', title: 'Move', message: 'soon',
+  car_side: 'even', sweep_events: [{ date: inDays(2), side: 'even', time: '8:00 AM - 12:00 PM' }],
+  side_detection: { side: 'even', car_house_number: 12 },
+  house_num: 12, latitude: 42.385, longitude: -71.108,
+});
 
-const { loadStore, saveStore, patchSub } = await import('../store/subscriptions.js');
+const { loadStore, patchUser, loadSubscribedUsers } = await import('../store/users.js');
 const { postSlackDM } = await import('../integrations/slack.js');
+const { getTeslaAccess } = await import('../integrations/tesla-auth.js');
+const { fetchVehicleData } = await import('../integrations/tesla.js');
 const { runNotifications } = await import('../notifications/cron.js');
+
+const SUB = {
+  id: 'sub1', slack_user_id: 'U060NLFUM', vehicle_id: '999999999999999',
+  vehicle_name: 'Test Vehicle', refresh_token: 'STUB_REFRESH_TOKEN',
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
-  loadStore.mockReturnValue({
-    subscriptions: [
-      {
-        id: 'sub1', slack_user_id: 'U060NLFUM', vehicle_id: 999999999999999,
-        vehicle_name: 'Test Vehicle', refresh_token: 'STUB_REFRESH_TOKEN',
-      },
-    ],
-  });
+  // loadStore is only used by the run-timestamp write + recovery helpers.
+  loadStore.mockReturnValue({ users: [] });
+  // loadSubscribedUsers is the cron's working set.
+  loadSubscribedUsers.mockReturnValue([{ ...SUB }]);
 });
 
 describe('runNotifications mode validation', () => {
@@ -75,20 +94,48 @@ describe('runNotifications mode validation', () => {
 });
 
 describe('runNotifications stub vehicle short-circuit', () => {
-  it('does not call teslaTokenExchange or fetchVehicleData for stub subs', async () => {
-    const { teslaTokenExchange, fetchVehicleData } = await import('../integrations/tesla.js');
+  it('does not touch Tesla (getTeslaAccess / fetchVehicleData) for stub subs', async () => {
     const out = await runNotifications({ mode: 'daily' });
-    expect(teslaTokenExchange).not.toHaveBeenCalled();
+    expect(getTeslaAccess).not.toHaveBeenCalled();
     expect(fetchVehicleData).not.toHaveBeenCalled();
     expect(out.results[0].ok).toBe(true);
     expect(out.results[0].battery_level).toBe(78);
   });
 });
 
+describe('runNotifications real (non-stub) vehicle path', () => {
+  it('goes through getTeslaAccess for a real refresh_token and uses the access_token in the vehicle_data call', async () => {
+    loadSubscribedUsers.mockReturnValue([{ ...SUB, refresh_token: 'RT_real' }]);
+    getTeslaAccess.mockResolvedValue('AT_live');
+    fetchVehicleData.mockResolvedValue({ response: {
+      drive_state: { latitude: 42.385, longitude: -71.108 },
+      charge_state: { battery_level: 64 },
+    } });
+    const out = await runNotifications({ mode: 'daily' });
+    expect(getTeslaAccess).toHaveBeenCalledWith('sub1');
+    expect(fetchVehicleData).toHaveBeenCalledWith(
+      expect.objectContaining({ Authorization: 'Bearer AT_live' }),
+      '999999999999999',
+    );
+    expect(out.results[0].ok).toBe(true);
+    expect(out.results[0].battery_level).toBe(64);
+  });
+
+  it('surfaces a getTeslaAccess failure as a per-sub error + bumps consecutive_failures', async () => {
+    loadSubscribedUsers.mockReturnValue([{ ...SUB, refresh_token: 'RT_dead', consecutive_failures: 0 }]);
+    getTeslaAccess.mockRejectedValue(new Error('Tesla refused the refresh_token: invalid_grant'));
+    const out = await runNotifications({ mode: 'daily' });
+    expect(out.results[0].ok).toBe(false);
+    expect(out.results[0].error).toMatch(/invalid_grant/);
+    expect(out.results[0].consecutive_failures).toBe(1);
+    expect(fetchVehicleData).not.toHaveBeenCalled();
+  });
+});
+
 describe('runNotifications dispatch', () => {
   it("daily mode sends a DM via formatPlanDM when plan triggers", async () => {
     const out = await runNotifications({ mode: 'daily' });
-    // Sweep-check returns days_until_next=1, side=even — planner would fire.
+    // Sweep-check returns days_until_next=2, side=even — planner would fire.
     expect(out.results[0].plan).toBeDefined();
     // Must actually have called postSlackDM with the addressed user. A
     // green test on plan-defined alone would silently pass even if the
@@ -96,22 +143,17 @@ describe('runNotifications dispatch', () => {
     expect(postSlackDM).toHaveBeenCalledWith('U060NLFUM', expect.stringContaining('Move'));
     // And persisted last_dm_date so a same-day re-run dedupes.
     const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
-    expect(patchSub).toHaveBeenCalledWith('sub1', { last_dm_date: todayET });
+    expect(patchUser).toHaveBeenCalledWith('sub1', { last_dm_date: todayET });
   });
 
   it('clears last_dm_error_at on recovery so a future outage can DM immediately', async () => {
     // Sub had a stuck-DM cooldown set last week; this run succeeds.
-    loadStore.mockReturnValue({
-      subscriptions: [{
-        id: 'sub1', slack_user_id: 'U060NLFUM', vehicle_id: 999999999999999,
-        vehicle_name: 'Test Vehicle', refresh_token: 'STUB_REFRESH_TOKEN',
-        last_dm_error_at: '2026-04-30T17:00:00.000Z',
-        consecutive_failures: 5,
-      }],
-    });
+    loadSubscribedUsers.mockReturnValue([{
+      ...SUB, last_dm_error_at: '2026-04-30T17:00:00.000Z', consecutive_failures: 5,
+    }]);
     await runNotifications({ mode: 'daily' });
     // The persist call should include last_dm_error_at: null. Find it.
-    const persistCall = patchSub.mock.calls.find(([id, patch]) => id === 'sub1' && 'last_check_at' in patch);
+    const persistCall = patchUser.mock.calls.find(([id, patch]) => id === 'sub1' && 'last_check_at' in patch);
     expect(persistCall).toBeDefined();
     expect(persistCall[1].last_dm_error_at).toBeNull();
     expect(persistCall[1].consecutive_failures).toBe(0);
@@ -121,13 +163,7 @@ describe('runNotifications dispatch', () => {
     // Pre-set last_digest_date to today's ET date so the dedup branch skips
     // the DM. Today's ET-format date:
     const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
-    loadStore.mockReturnValue({
-      subscriptions: [{
-        id: 'sub1', slack_user_id: 'U060NLFUM', vehicle_id: 999999999999999,
-        vehicle_name: 'Test Vehicle', refresh_token: 'STUB_REFRESH_TOKEN',
-        last_digest_date: todayET,
-      }],
-    });
+    loadSubscribedUsers.mockReturnValue([{ ...SUB, last_digest_date: todayET }]);
     const out = await runNotifications({ mode: 'weekly' });
     expect(out.results[0].digest_skipped).toBe('already-sent-today');
     // Slack DM should NOT have fired this run (the existing all-clear from

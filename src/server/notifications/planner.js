@@ -3,7 +3,7 @@
 
 const WINDOW_DAYS = 7;
 const TIGHT_FLIP_DAYS = 3;
-const APP_URL = 'https://claw.bitvox.me/sweeper/';
+const APP_URL = 'https://sweeper.bitvox.me/';
 
 export function classifyWeek({ events = [], carSide = null, sideDetection = null, todayET }) {
   if (!todayET) throw new Error('classifyWeek: todayET required');

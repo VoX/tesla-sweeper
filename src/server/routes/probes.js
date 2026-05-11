@@ -4,7 +4,7 @@ import { Router } from 'express';
 import { wrap } from '../middleware/errors.js';
 import { whichSide } from '../integrations/overpass.js';
 import { runSweepCheck } from '../sweep/check.js';
-import { loadStore } from '../store/subscriptions.js';
+import { loadStore } from '../store/users.js';
 
 export const probesRouter = Router();
 
@@ -33,6 +33,6 @@ probesRouter.get('/healthz', (req, res) => {
     ok: true,
     last_run_at: store.last_run_at || null,
     last_digest_run_at: store.last_digest_run_at || null,
-    sub_count: (store.subscriptions || []).length,
+    sub_count: store.users.filter(u => u.slack_user_id && u.vehicle_id).length,
   });
 });

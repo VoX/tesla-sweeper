@@ -56,7 +56,7 @@ npm install           # installs both workspaces
 npm run dev           # runs server (20040) + vite (5173) concurrently
 ```
 
-Open `http://localhost:5173/sweeper/`.
+Open `http://localhost:5173/`.
 
 For production:
 

@@ -169,10 +169,15 @@ Steps:
 6. **OAuth redirect URI**: Tesla OAuth + Slack OAuth both register a
    `redirect_uri` in their respective developer consoles, currently pointing
    at `https://claw.bitvox.me/sweeper/`. Update both to
-   `https://sweeper.bitvox.me/`. Keep both registered for one release so
-   in-flight OAuth flows from the old URL still complete.
+   `https://sweeper.bitvox.me/oauth`. (Tesla rejects bare-host redirects
+   without a path; `/oauth` works because the express SPA catch-all serves
+   `index.html` for any non-`/api/*` path, and the SPA's OAuth callback
+   handler reads `code`+`state` from `window.location.search` regardless of
+   pathname.) Keep both URIs registered for one release so in-flight OAuth
+   flows from the old URL still complete via the 308 redirect.
 7. **`.env` updates**: `TESLA_REDIRECT_URI` + `SLACK_REDIRECT_URI` env vars
-   to the new URL.
+   to `https://sweeper.bitvox.me/oauth`. Apply only after the dev consoles
+   accept the new URI.
 8. **Verification**: `curl https://sweeper.bitvox.me/api/notifications/status?slack_user_id=U060NLFUM` → 200 with subs list. `curl -L https://claw.bitvox.me/sweeper/` → 308 → 200 from the new host.
 9. **Backwards compat window**: leave the redirect in place for ~1 month,
    then remove the `handle_path /sweeper/*` block from caddy.

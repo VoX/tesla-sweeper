@@ -5,16 +5,16 @@
 
 import cron from 'node-cron';
 import { classifyWeek, shouldDispatchPlan, formatPlanDM, formatWeeklyDigest } from './planner.js';
-import { loadStore, saveStore, patchSub } from '../store/subscriptions.js';
+import { loadStore, saveStore, patchUser, loadSubscribedUsers } from '../store/users.js';
 import {
   STUB_VEHICLE_ENABLED, STUB_REFRESH_TOKEN, STUB_VEHICLE_LAT, STUB_VEHICLE_LNG,
-  teslaTokenExchange, fetchVehicleData,
+  fetchVehicleData,
 } from '../integrations/tesla.js';
+import { getTeslaAccess } from '../integrations/tesla-auth.js';
 import { reverseGeocodeLocation } from '../integrations/nominatim.js';
 import { postSlackDM } from '../integrations/slack.js';
 import { runSweepCheck } from '../sweep/check.js';
 
-const TESLA_APP_CLIENT_ID = process.env.TESLA_CLIENT_ID || '';
 const STUCK_FAIL_THRESHOLD = 3;
 const STUCK_DM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
@@ -31,7 +31,7 @@ export async function runNotifications({ mode = 'daily' } = {}) {
   }
   runningMode = mode;
   runningNotifications = (async () => {
-    const subs = loadStore().subscriptions || [];
+    const subs = loadSubscribedUsers();
     const results = [];
     const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
 
@@ -46,15 +46,13 @@ export async function runNotifications({ mode = 'daily' } = {}) {
           longitude = STUB_VEHICLE_LNG;
           out.battery_level = 78;
         } else {
-          const rotated = await teslaTokenExchange({ grant_type: 'refresh_token', client_id: TESLA_APP_CLIENT_ID, refresh_token: sub.refresh_token });
-          // Tesla rotates refresh_tokens on each exchange; persist
-          // immediately so a crash later in the loop doesn't leave us
-          // with a now-revoked token next run.
-          if (rotated.refresh_token && rotated.refresh_token !== sub.refresh_token) {
-            patchSub(sub.id, { refresh_token: rotated.refresh_token });
-          }
-          const headers = { Authorization: `Bearer ${rotated.access_token}`, 'Content-Type': 'application/json' };
-
+          // getTeslaAccess owns the refresh-token rotation + persistence
+          // (and the retry/classification of Tesla token-endpoint
+          // failures). Throws RevokedError / ConfigError / TransientError
+          // — all caught by the per-sub try/catch below and surfaced via
+          // consecutive_failures + the stuck-sub DM.
+          const access = await getTeslaAccess(sub.id);
+          const headers = { Authorization: `Bearer ${access}`, 'Content-Type': 'application/json' };
           const locData = await fetchVehicleData(headers, sub.vehicle_id);
           ({ latitude, longitude } = locData.response?.drive_state || {});
           out.battery_level = locData.response?.charge_state?.battery_level ?? null;
@@ -102,7 +100,7 @@ export async function runNotifications({ mode = 'daily' } = {}) {
       // outage can DM immediately instead of waiting up to 24h on a
       // stale `last_dm_error_at` from the prior failure window.
       if (out.ok && sub.last_dm_error_at) persist.last_dm_error_at = null;
-      patchSub(sub.id, persist);
+      patchUser(sub.id, persist);
       out.last_dm_error_at = sub.last_dm_error_at || null;
       out.last_dm_date = sub.last_dm_date || null;
       out.last_digest_date = sub.last_digest_date || null;
@@ -124,7 +122,7 @@ export async function runNotifications({ mode = 'daily' } = {}) {
           formatPlanDM({ vehicleName: out.vehicle_name, address: out.address, plan: out.plan }));
         out.dm_sent = dm.ok;
         out.dm_error = dm.error || null;
-        if (dm.ok) patchSub(out.sub_id, { last_dm_date: todayET });
+        if (dm.ok) patchUser(out.sub_id, { last_dm_date: todayET });
       }
     } else if (mode === 'weekly') {
       // Sunday-evening digest: full schedule + recommendation, every sub
@@ -137,7 +135,7 @@ export async function runNotifications({ mode = 'daily' } = {}) {
           formatWeeklyDigest({ vehicleName: out.vehicle_name, address: out.address, plan: out.plan }));
         out.digest_sent = dm.ok;
         out.digest_error = dm.error || null;
-        if (dm.ok) patchSub(out.sub_id, { last_digest_date: todayET });
+        if (dm.ok) patchUser(out.sub_id, { last_digest_date: todayET });
       }
     }
 
@@ -150,9 +148,9 @@ export async function runNotifications({ mode = 'daily' } = {}) {
         const lastErrTs = out.last_dm_error_at ? Date.parse(out.last_dm_error_at) : 0;
         if (Date.now() - lastErrTs < STUCK_DM_COOLDOWN_MS) continue;
         const dm = await postSlackDM(out.slack_user_id,
-          `:warning: *${out.vehicle_name}* sweeper notifications have been failing for ${out.consecutive_failures} runs. Last error: \`${out.error}\`. Re-enable at <https://claw.bitvox.me/sweeper/>.`);
+          `:warning: *${out.vehicle_name}* sweeper notifications have been failing for ${out.consecutive_failures} runs. Last error: \`${out.error}\`. Re-enable at <https://sweeper.bitvox.me/>.`);
         out.error_dm_sent = dm.ok;
-        if (dm.ok) patchSub(out.sub_id, { last_dm_error_at: new Date().toISOString() });
+        if (dm.ok) patchUser(out.sub_id, { last_dm_error_at: new Date().toISOString() });
       }
     }
 

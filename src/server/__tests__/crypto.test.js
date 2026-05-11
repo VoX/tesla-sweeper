@@ -5,8 +5,9 @@ import { createHmac } from 'node:crypto';
 // a deterministic key BEFORE the import so signSession/verifySession
 // can sign + verify in this test process.
 process.env.SESSION_HMAC_KEY = 'a'.repeat(64); // 32-byte hex
-const { signSession, verifySession } = await import('../crypto/session.js');
+const { signSession, verifySession, signOpaque, verifyOpaque } = await import('../crypto/session.js');
 const { bearerOk } = await import('../crypto/bearer.js');
+const { mintSessionId, readSessionCookie } = await import('../util/session.js');
 
 describe('signSession / verifySession', () => {
   it('signs a token and verifies it for the same slack_user_id', () => {
@@ -47,6 +48,74 @@ describe('signSession / verifySession', () => {
   it('rejects a token without 3 parts', () => {
     expect(verifySession('only.two', 'U')).toBe(false);
     expect(verifySession('a.b.c.d', 'U')).toBe(false);
+  });
+});
+
+describe('signOpaque / verifyOpaque', () => {
+  it('round-trips a value', () => {
+    const signed = signOpaque('abc-123_DEF');
+    expect(signed).toMatch(/^abc-123_DEF\..+$/);
+    expect(verifyOpaque(signed)).toBe('abc-123_DEF');
+  });
+
+  it('returns null on a tampered MAC', () => {
+    const signed = signOpaque('opaque');
+    expect(verifyOpaque(signed.slice(0, -2) + 'ZZ')).toBeNull();
+  });
+
+  it('returns null on a tampered value', () => {
+    const signed = signOpaque('opaque');
+    expect(verifyOpaque('OPAQUE.' + signed.split('.').pop())).toBeNull();
+  });
+
+  it('handles values containing dots (uses lastIndexOf)', () => {
+    const signed = signOpaque('a.b.c');
+    expect(verifyOpaque(signed)).toBe('a.b.c');
+  });
+
+  it('returns null on empty / null / non-string / no-dot input', () => {
+    expect(verifyOpaque('')).toBeNull();
+    expect(verifyOpaque(null)).toBeNull();
+    expect(verifyOpaque(42)).toBeNull();
+    expect(verifyOpaque('nodothere')).toBeNull();
+    expect(verifyOpaque('.leadingdot')).toBeNull();
+  });
+});
+
+describe('session cookie helpers (util/session.js)', () => {
+  it('mintSessionId produces an unsigned sid + a signed cookie value that verifies back to it', () => {
+    const { sid, signed } = mintSessionId();
+    expect(typeof sid).toBe('string');
+    expect(sid.length).toBeGreaterThan(20); // 32 random bytes base64url
+    expect(signed.startsWith(sid + '.')).toBe(true);
+    expect(verifyOpaque(signed)).toBe(sid);
+  });
+
+  it('mintSessionId returns a different id each call', () => {
+    expect(mintSessionId().sid).not.toBe(mintSessionId().sid);
+  });
+
+  it('readSessionCookie extracts + verifies the cookie', () => {
+    const { sid, signed } = mintSessionId();
+    expect(readSessionCookie({ cookies: { session: signed } })).toBe(sid);
+  });
+
+  it('readSessionCookie returns null when the cookie is absent', () => {
+    expect(readSessionCookie({ cookies: {} })).toBeNull();
+    expect(readSessionCookie({})).toBeNull();
+    expect(readSessionCookie(undefined)).toBeNull();
+  });
+
+  it('readSessionCookie returns null on a forged/tampered cookie', () => {
+    const { signed } = mintSessionId();
+    // Flip the FIRST base64url char of the sid — full 6 meaningful bits,
+    // so the decoded value definitely changes (the last char of a 32-byte
+    // digest carries 2 don't-care padding bits, so flipping it can be a
+    // no-op at the byte level — that made an earlier `slice(0,-1)+'X'`
+    // form flake ~1/16 runs).
+    const tampered = (signed[0] === 'A' ? 'B' : 'A') + signed.slice(1);
+    expect(readSessionCookie({ cookies: { session: tampered } })).toBeNull();
+    expect(readSessionCookie({ cookies: { session: 'not-even-signed' } })).toBeNull();
   });
 });
 

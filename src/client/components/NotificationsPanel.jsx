@@ -3,7 +3,7 @@ import { parseSlackInput } from '../lib/slack-input.js';
 // "Daily Slack Pings" panel. Shows the connected sub when one exists
 // for this (slack_user_id, vehicle_id) pair, otherwise the Slack
 // sign-in flow + manual U-id fallback.
-export function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis, notifLoading, notifError, onSlackSignIn, onEnable, onDisable }) {
+export function NotificationsPanel({ slackUserId, setSlackUserId, hasSlackSession, enabledForThis, notifLoading, notifError, onSlackSignIn, onEnable, onDisable }) {
   return (
     <div className="card" style={{ marginTop: 16 }}>
       <h3>🔔 Daily Slack Pings</h3>
@@ -22,13 +22,18 @@ export function NotificationsPanel({ slackUserId, setSlackUserId, enabledForThis
         </>
       ) : (
         <>
-          {slackUserId && (
+          {slackUserId && hasSlackSession && (
             <p style={{ fontSize: '0.85rem', marginBottom: 12 }}>
               🔐 Signed in as <code>{slackUserId}</code>. Click Enable to subscribe, or sign in as someone else.
             </p>
           )}
+          {slackUserId && !hasSlackSession && (
+            <p style={{ fontSize: '0.85rem', marginBottom: 12, color: '#d29922' }}>
+              ⚠️ Saved Slack id <code>{slackUserId}</code>, but your Slack session has expired. Click <strong>Sign in with Slack</strong> below to refresh it before enabling.
+            </p>
+          )}
           <button onClick={onSlackSignIn} disabled={notifLoading} style={{ marginBottom: 12 }}>
-            {notifLoading ? 'Connecting to Slack...' : (slackUserId ? 'Switch slack account' : 'Sign in with Slack')}
+            {notifLoading ? 'Connecting to Slack...' : (slackUserId && hasSlackSession ? 'Switch slack account' : 'Sign in with Slack')}
           </button>
           <details style={{ marginBottom: 12 }} open={!slackUserId ? false : undefined}>
             <summary style={{ fontSize: '0.8rem', color: '#8b949e', cursor: 'pointer' }}>or paste your slack user id manually</summary>

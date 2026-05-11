@@ -1,50 +1,20 @@
-// Tesla Fleet API OAuth2 + Slack OIDC handlers. client_secret stays
-// server-side; Slack callback mints an HMAC session bound to the
-// verified slack_user_id (used by /enable + /disable).
+// OAuth entry points: the Tesla Fleet API authorize-URL builder (the
+// code exchange itself lives in routes/session.js → /api/session/create
+// now) and the "Sign in with Slack" OIDC flow. The Slack callback mints
+// an HMAC session bound to the verified slack_user_id (used by /enable +
+// /disable); client_secret stays server-side.
 
 import { Router } from 'express';
-import { randomBytes } from 'node:crypto';
 import { wrap } from '../middleware/errors.js';
-import { teslaTokenExchange, TESLA_BASE } from '../integrations/tesla.js';
 import { signSession } from '../crypto/session.js';
 import { fetchWithTimeout } from '../util/fetch.js';
+import { mintState, consumeState } from '../util/oauth-state.js';
 
 const TESLA_APP_CLIENT_ID = process.env.TESLA_CLIENT_ID || '';
-const TESLA_APP_CLIENT_SECRET = process.env.TESLA_CLIENT_SECRET || '';
 const TESLA_APP_REDIRECT_URI = process.env.TESLA_REDIRECT_URI || '';
 const SLACK_CLIENT_ID = process.env.SLACK_CLIENT_ID || '';
 const SLACK_CLIENT_SECRET = process.env.SLACK_CLIENT_SECRET || '';
 const SLACK_REDIRECT_URI = process.env.SLACK_REDIRECT_URI || '';
-
-// Server-side OAuth `state` registry. /start mints + records, /callback
-// requires a matching+unconsumed entry. Defends against CSRF beyond the
-// SPA's localStorage check (which an attacker who controls the SPA
-// origin could circumvent). 10min TTL covers a sane redirect→exchange
-// window; entries are deleted on use (one-shot).
-const STATE_TTL_MS = 10 * 60 * 1000;
-// Hard cap so an unauthenticated /start flood can't grow the registry
-// to tens of MB even within the TTL window. 10k entries × ~80B = ~800K,
-// fine for our scale (a single human user). Past the cap we GC and, if
-// still full, refuse new mints (caller gets a 503).
-const STATE_MAX_ENTRIES = 10_000;
-const stateStore = new Map();
-function mintState(type) {
-  // Lazy GC on each mint — keeps the map from growing unbounded if a
-  // user starts but never finishes flows. O(N) but N ≤ a handful.
-  const now = Date.now();
-  for (const [k, v] of stateStore) if (v.expires_at < now) stateStore.delete(k);
-  if (stateStore.size >= STATE_MAX_ENTRIES) return null;
-  const state = randomBytes(32).toString('base64url');
-  stateStore.set(state, { type, expires_at: now + STATE_TTL_MS });
-  return state;
-}
-function consumeState(state, expectedType) {
-  if (!state) return false;
-  const entry = stateStore.get(state);
-  if (!entry || entry.expires_at < Date.now() || entry.type !== expectedType) return false;
-  stateStore.delete(state);
-  return true;
-}
 
 export const oauthRouter = Router();
 
@@ -56,25 +26,6 @@ oauthRouter.post('/api/oauth/app/start', (req, res) => {
   const params = new URLSearchParams({ response_type: 'code', client_id: TESLA_APP_CLIENT_ID, redirect_uri: TESLA_APP_REDIRECT_URI, scope, state, prompt: 'login', locale: 'en-US' });
   res.json({ url: `https://auth.tesla.com/oauth2/v3/authorize?${params}`, state });
 });
-
-oauthRouter.post('/api/oauth/app/callback', wrap(async (req, res) => {
-  const { code, state } = req.body;
-  if (!code) return res.status(400).json({ detail: 'code required' });
-  if (!consumeState(state, 'tesla')) return res.status(400).json({ detail: 'invalid or expired state' });
-  console.log('[oauth/app] Exchanging code for token');
-  const data = await teslaTokenExchange({
-    grant_type: 'authorization_code', client_id: TESLA_APP_CLIENT_ID, client_secret: TESLA_APP_CLIENT_SECRET,
-    code, redirect_uri: TESLA_APP_REDIRECT_URI, audience: TESLA_BASE,
-  });
-  console.log('[oauth/app] Token obtained, expires_in:', data.expires_in);
-  res.json({ access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in, token_type: data.token_type });
-}));
-
-oauthRouter.post('/api/oauth/app/refresh', wrap(async (req, res) => {
-  const { refresh_token } = req.body;
-  const data = await teslaTokenExchange({ grant_type: 'refresh_token', client_id: TESLA_APP_CLIENT_ID, refresh_token });
-  res.json({ access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in });
-}));
 
 // "Sign in with Slack" — OIDC flow so users can subscribe to
 // notifications without hunting for their member id.
