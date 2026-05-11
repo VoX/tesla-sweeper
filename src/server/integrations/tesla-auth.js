@@ -120,7 +120,9 @@ async function refreshOnce(userId) {
     if (body.error === 'invalid_grant') {
       patchUser(userId, { refresh_invalidated_at: new Date().toISOString() });
       console.warn(`[session] refresh_failed userId=${userId} reason=invalid_grant — refresh_token revoked, user must re-OAuth`);
-      throw new RevokedError(`Tesla refused the refresh_token for ${userId}: invalid_grant`);
+      // Message is user-facing (flows into the stuck-sub Slack DM) — keep
+      // the internal userId out of it; it's already in the log line above.
+      throw new RevokedError('Tesla login expired — re-authorize to keep notifications running');
     }
     console.error(`[session] refresh_failed userId=${userId} reason=config status=${res.status} error=${body.error || '?'}`);
     throw new ConfigError(`Tesla token exchange config error (${res.status} ${body.error || ''})`);

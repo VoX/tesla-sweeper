@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Mock everything the cron touches; the test exercises mode validation,
-// single-flight behavior, and stub-vehicle short-circuit logic.
+// Mock everything the cron touches; the tests exercise mode validation,
+// the stub-vehicle short-circuit, the real (getTeslaAccess) vehicle path,
+// dispatch/dedup, and single-flight behavior.
 
 vi.mock('../store/users.js', () => ({
   loadStore: vi.fn(),
@@ -15,8 +16,11 @@ vi.mock('../integrations/tesla.js', () => ({
   STUB_REFRESH_TOKEN: 'STUB_REFRESH_TOKEN',
   STUB_VEHICLE_LAT: 42.385,
   STUB_VEHICLE_LNG: -71.108,
-  teslaTokenExchange: vi.fn(),
   fetchVehicleData: vi.fn(),
+}));
+
+vi.mock('../integrations/tesla-auth.js', () => ({
+  getTeslaAccess: vi.fn(),
 }));
 
 vi.mock('../integrations/nominatim.js', () => ({
@@ -49,8 +53,10 @@ runSweepCheck.mockResolvedValue({
   house_num: 12, latitude: 42.385, longitude: -71.108,
 });
 
-const { loadStore, saveStore, patchSub, loadSubscribedUsers } = await import('../store/users.js');
+const { loadStore, patchSub, loadSubscribedUsers } = await import('../store/users.js');
 const { postSlackDM } = await import('../integrations/slack.js');
+const { getTeslaAccess } = await import('../integrations/tesla-auth.js');
+const { fetchVehicleData } = await import('../integrations/tesla.js');
 const { runNotifications } = await import('../notifications/cron.js');
 
 const SUB = {
@@ -88,13 +94,41 @@ describe('runNotifications mode validation', () => {
 });
 
 describe('runNotifications stub vehicle short-circuit', () => {
-  it('does not call teslaTokenExchange or fetchVehicleData for stub subs', async () => {
-    const { teslaTokenExchange, fetchVehicleData } = await import('../integrations/tesla.js');
+  it('does not touch Tesla (getTeslaAccess / fetchVehicleData) for stub subs', async () => {
     const out = await runNotifications({ mode: 'daily' });
-    expect(teslaTokenExchange).not.toHaveBeenCalled();
+    expect(getTeslaAccess).not.toHaveBeenCalled();
     expect(fetchVehicleData).not.toHaveBeenCalled();
     expect(out.results[0].ok).toBe(true);
     expect(out.results[0].battery_level).toBe(78);
+  });
+});
+
+describe('runNotifications real (non-stub) vehicle path', () => {
+  it('goes through getTeslaAccess for a real refresh_token and uses the access_token in the vehicle_data call', async () => {
+    loadSubscribedUsers.mockReturnValue([{ ...SUB, refresh_token: 'RT_real' }]);
+    getTeslaAccess.mockResolvedValue('AT_live');
+    fetchVehicleData.mockResolvedValue({ response: {
+      drive_state: { latitude: 42.385, longitude: -71.108 },
+      charge_state: { battery_level: 64 },
+    } });
+    const out = await runNotifications({ mode: 'daily' });
+    expect(getTeslaAccess).toHaveBeenCalledWith('sub1');
+    expect(fetchVehicleData).toHaveBeenCalledWith(
+      expect.objectContaining({ Authorization: 'Bearer AT_live' }),
+      '999999999999999',
+    );
+    expect(out.results[0].ok).toBe(true);
+    expect(out.results[0].battery_level).toBe(64);
+  });
+
+  it('surfaces a getTeslaAccess failure as a per-sub error + bumps consecutive_failures', async () => {
+    loadSubscribedUsers.mockReturnValue([{ ...SUB, refresh_token: 'RT_dead', consecutive_failures: 0 }]);
+    getTeslaAccess.mockRejectedValue(new Error('Tesla refused the refresh_token: invalid_grant'));
+    const out = await runNotifications({ mode: 'daily' });
+    expect(out.results[0].ok).toBe(false);
+    expect(out.results[0].error).toMatch(/invalid_grant/);
+    expect(out.results[0].consecutive_failures).toBe(1);
+    expect(fetchVehicleData).not.toHaveBeenCalled();
   });
 });
 

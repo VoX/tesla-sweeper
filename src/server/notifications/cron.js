@@ -8,13 +8,13 @@ import { classifyWeek, shouldDispatchPlan, formatPlanDM, formatWeeklyDigest } fr
 import { loadStore, saveStore, patchSub, loadSubscribedUsers } from '../store/users.js';
 import {
   STUB_VEHICLE_ENABLED, STUB_REFRESH_TOKEN, STUB_VEHICLE_LAT, STUB_VEHICLE_LNG,
-  teslaTokenExchange, fetchVehicleData,
+  fetchVehicleData,
 } from '../integrations/tesla.js';
+import { getTeslaAccess } from '../integrations/tesla-auth.js';
 import { reverseGeocodeLocation } from '../integrations/nominatim.js';
 import { postSlackDM } from '../integrations/slack.js';
 import { runSweepCheck } from '../sweep/check.js';
 
-const TESLA_APP_CLIENT_ID = process.env.TESLA_CLIENT_ID || '';
 const STUCK_FAIL_THRESHOLD = 3;
 const STUCK_DM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
@@ -46,15 +46,13 @@ export async function runNotifications({ mode = 'daily' } = {}) {
           longitude = STUB_VEHICLE_LNG;
           out.battery_level = 78;
         } else {
-          const rotated = await teslaTokenExchange({ grant_type: 'refresh_token', client_id: TESLA_APP_CLIENT_ID, refresh_token: sub.refresh_token });
-          // Tesla rotates refresh_tokens on each exchange; persist
-          // immediately so a crash later in the loop doesn't leave us
-          // with a now-revoked token next run.
-          if (rotated.refresh_token && rotated.refresh_token !== sub.refresh_token) {
-            patchSub(sub.id, { refresh_token: rotated.refresh_token });
-          }
-          const headers = { Authorization: `Bearer ${rotated.access_token}`, 'Content-Type': 'application/json' };
-
+          // getTeslaAccess owns the refresh-token rotation + persistence
+          // (and the retry/classification of Tesla token-endpoint
+          // failures). Throws RevokedError / ConfigError / TransientError
+          // — all caught by the per-sub try/catch below and surfaced via
+          // consecutive_failures + the stuck-sub DM.
+          const access = await getTeslaAccess(sub.id);
+          const headers = { Authorization: `Bearer ${access}`, 'Content-Type': 'application/json' };
           const locData = await fetchVehicleData(headers, sub.vehicle_id);
           ({ latitude, longitude } = locData.response?.drive_state || {});
           out.battery_level = locData.response?.charge_state?.battery_level ?? null;
