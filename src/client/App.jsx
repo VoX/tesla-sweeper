@@ -437,8 +437,12 @@ export default function App() {
     const state = params.get('state');
     if (!code) { checkSession(); return; }
 
-    // Strip just the OAuth params (code/state); preserve ?tab=.
+    // Strip the OAuth params (code/state) and walk back to the root —
+    // the Tesla/Slack redirect drops you on /oauth, but post-callback
+    // there's no reason to leave the user sitting on that path. Preserve
+    // ?tab= so a manual-tab user lands back on their tab.
     const cleaned = new URL(window.location);
+    cleaned.pathname = '/';
     cleaned.searchParams.delete('code');
     cleaned.searchParams.delete('state');
     window.history.replaceState({}, '', cleaned);

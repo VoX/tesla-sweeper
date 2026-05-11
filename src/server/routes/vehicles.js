@@ -2,12 +2,11 @@
 // /api/vehicles lists, /api/check fetches GPS (stub short-circuit +
 // wake/poll on 408), /api/reverse-geocode wraps Nominatim.
 //
-// Auth (BFF, Phase 6): the preferred path is the signed `session`
-// cookie — the server then brokers a Tesla access_token via
-// getTeslaAccess (which owns refresh-token rotation). A legacy `token`
-// body field is still accepted for one release so a stale cached SPA
-// keeps working; it'll be removed in Phase 8. Cookie wins if both are
-// present.
+// Auth: the signed `session` cookie. The server brokers a Tesla
+// access_token via getTeslaAccess (which owns refresh-token rotation).
+// Phase 8 removed the legacy `token` body fallback — the BFF SPA on
+// sweeper.bitvox.me has been the only client since deploy and zero
+// legacy hits showed in logs.
 
 import { Router } from 'express';
 import { wrap } from '../middleware/errors.js';
@@ -32,19 +31,15 @@ function mapTeslaAccessError(res, e) {
   return res.status(502).json({ detail: 'Upstream error' });
 }
 
-// Resolve a usable Tesla access_token: cookie path (broker via
-// getTeslaAccess on the bound record) or legacy `token` body. Returns
-// the token string, or null after sending a 401/4xx/5xx itself — the
-// caller should just `return` on null.
+// Resolve a usable Tesla access_token: read the session cookie, find
+// the bound user record, broker a token via getTeslaAccess. Returns the
+// token string, or null after sending a 401/4xx/5xx itself — the caller
+// should just `return` on null.
 async function resolveAccess(req, res) {
   const cookieUser = loadUserBySession(readSessionCookie(req));
-  if (cookieUser) {
-    try { return await getTeslaAccess(cookieUser.id); }
-    catch (e) { mapTeslaAccessError(res, e); return null; }
-  }
-  if (req.body?.token) return req.body.token;
-  res.status(401).json({ detail: 'Not signed in' });
-  return null;
+  if (!cookieUser) { res.status(401).json({ detail: 'Not signed in' }); return null; }
+  try { return await getTeslaAccess(cookieUser.id); }
+  catch (e) { mapTeslaAccessError(res, e); return null; }
 }
 
 vehiclesRouter.post('/api/vehicles', wrap(async (req, res) => {
@@ -68,14 +63,9 @@ vehiclesRouter.post('/api/check', wrap(async (req, res) => {
     return res.json({ vehicle_name: STUB_VEHICLE_NAME, latitude: STUB_VEHICLE_LAT, longitude: STUB_VEHICLE_LNG, battery_level: 78 });
   }
 
+  if (!cookieUser) return res.status(401).json({ detail: 'Not signed in' });
   let accessToken;
-  if (cookieUser) {
-    try { accessToken = await getTeslaAccess(cookieUser.id); } catch (e) { return mapTeslaAccessError(res, e); }
-  } else if (req.body?.token) {
-    accessToken = req.body.token;
-  } else {
-    return res.status(401).json({ detail: 'Not signed in' });
-  }
+  try { accessToken = await getTeslaAccess(cookieUser.id); } catch (e) { return mapTeslaAccessError(res, e); }
 
   if (!vid) {
     let list;

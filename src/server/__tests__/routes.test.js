@@ -231,36 +231,9 @@ describe('POST /api/slack/oauth/callback — id_token claim verification', () =>
   });
 });
 
-describe('POST /api/vehicles — stub injection + stringified ids', () => {
-  it('injects the stub vehicle when Tesla returns no real ones (STUB_VEHICLE_ENABLED=1)', async () => {
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn().mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ response: [] }), text: async () => '' });
-    const r = await request(app).post('/api/vehicles').send({ token: 'tok' });
-    globalThis.fetch = realFetch;
-    expect(r.status).toBe(200);
-    expect(r.body.vehicles.length).toBe(1);
-    expect(r.body.vehicles[0]).toMatchObject({ is_stub: true });
-    expect(typeof r.body.vehicles[0].id).toBe('string');
-  });
-
-  it('stringifies real Tesla vehicle ids at the boundary (BigInt precision safety)', async () => {
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn().mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ response: [{ id: 1234567890123456789, display_name: 'Car', vin: 'V', state: 'online' }] }), text: async () => '' });
-    const r = await request(app).post('/api/vehicles').send({ token: 'tok' });
-    globalThis.fetch = realFetch;
-    expect(r.status).toBe(200);
-    expect(typeof r.body.vehicles[0].id).toBe('string');
-    expect(r.body.vehicles[0].is_stub).toBeUndefined();
-  });
-
-  it('passes through a 401 from Tesla as a 401', async () => {
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn().mockResolvedValueOnce({ ok: false, status: 401, json: async () => ({}), text: async () => '' });
-    const r = await request(app).post('/api/vehicles').send({ token: 'expired' });
-    globalThis.fetch = realFetch;
-    expect(r.status).toBe(401);
-  });
-});
+// /api/vehicles cookie-path coverage (stub injection, BigInt-safe id
+// stringification, 401 passthrough) lives in session-routes.test.js. The
+// legacy `token` body path was dropped in Phase 8.
 
 describe('POST /api/reverse-geocode — lat/lng validation', () => {
   it('rejects non-numeric coords (would otherwise pollute Nominatim cache as NaN,NaN)', async () => {

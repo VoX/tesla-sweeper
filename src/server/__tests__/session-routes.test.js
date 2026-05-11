@@ -300,7 +300,7 @@ describe('Phase 6: /api/notifications/disable', () => {
   it('clears the sub with only the Slack HMAC (no Tesla cookie) and removes a cookie-less record', async () => {
     const rec = createUser(blankUser({ slack_user_id: SLACK_ID, vehicle_id: '999', vehicle_name: 'Car', refresh_token: 'RT' }));
     const res = await request(app).post('/api/notifications/disable')
-      .send({ id: rec.id, slack_user_id: SLACK_ID, session: signSession(SLACK_ID) });
+      .send({ id: rec.id, slack_user_id: SLACK_ID, slack_session: signSession(SLACK_ID) });
     expect(res.status).toBe(200);
     expect(res.body.disabled).toBe(true);
     expect(loadUsers()).toHaveLength(0);
@@ -311,7 +311,7 @@ describe('Phase 6: /api/notifications/disable', () => {
     const id = loadUsers()[0].id;
     patchUser(id, { slack_user_id: SLACK_ID, vehicle_id: '1234567890123456', vehicle_name: 'My Tesla' });
     const res = await request(app).post('/api/notifications/disable')
-      .send({ id, slack_user_id: SLACK_ID, session: signSession(SLACK_ID) });
+      .send({ id, slack_user_id: SLACK_ID, slack_session: signSession(SLACK_ID) });
     expect(res.status).toBe(200);
     const users = loadUsers();
     expect(users).toHaveLength(1);
@@ -322,7 +322,7 @@ describe('Phase 6: /api/notifications/disable', () => {
 
   it('wrong HMAC → 403', async () => {
     const rec = createUser(blankUser({ slack_user_id: SLACK_ID, vehicle_id: '9', refresh_token: 'RT' }));
-    expect((await request(app).post('/api/notifications/disable').send({ id: rec.id, slack_user_id: SLACK_ID, session: 'nope' })).status).toBe(403);
+    expect((await request(app).post('/api/notifications/disable').send({ id: rec.id, slack_user_id: SLACK_ID, slack_session: 'nope' })).status).toBe(403);
     expect(loadUsers()).toHaveLength(1);
   });
 });

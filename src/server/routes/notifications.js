@@ -6,27 +6,25 @@
 // on /disable: a user whose Tesla session has expired must still be able
 // to stop the DMs (re-do Slack OIDC → /disable, no Tesla OAuth needed).
 //
-// BFF (Phase 6): under the cookie path /enable reuses the cookie-bound
-// user record's server-owned refresh_token (no refresh_token in the
-// body); the legacy body path — `{refresh_token, ...}` — still works for
-// one release (a stale cached SPA) and creates a fresh record. One
-// subscription per slack_user_id, deliberately (multi-vehicle is a
-// separate, out-of-scope feature).
+// /enable requires a session cookie (the SPA OAuthed via /api/session/create
+// first); the server reuses the cookie-bound record's server-owned
+// refresh_token. One subscription per slack_user_id, deliberately
+// (multi-vehicle is a separate, out-of-scope feature). Phase 8 dropped
+// the legacy body-path that took an explicit refresh_token.
 
 import { Router } from 'express';
 import { wrap } from '../middleware/errors.js';
 import { verifySession } from '../crypto/session.js';
 import { bearerOk } from '../crypto/bearer.js';
 import {
-  blankUser, createUser, deleteUser, patchUser,
+  deleteUser, patchUser,
   loadUsers, loadUserById, loadUserBySession, loadSubscribedUsers, publicUser,
 } from '../store/users.js';
 import { readSessionCookie } from '../util/session.js';
-import { STUB_REFRESH_TOKEN, isStubVehicle, teslaTokenExchange } from '../integrations/tesla.js';
+import { STUB_REFRESH_TOKEN, isStubVehicle } from '../integrations/tesla.js';
 import { postSlackDM } from '../integrations/slack.js';
 import { runNotifications } from '../notifications/cron.js';
 
-const TESLA_APP_CLIENT_ID = process.env.TESLA_CLIENT_ID || '';
 const NOTIFICATIONS_RUN_TOKEN = process.env.NOTIFICATIONS_RUN_TOKEN || '';
 const SLACK_USER_ID_RE = /^U[A-Z0-9]+$/;
 
@@ -65,53 +63,36 @@ function clearOtherSubs(slackUserId, keepId) {
 }
 
 notificationsRouter.post('/api/notifications/enable', wrap(async (req, res) => {
-  const { refresh_token, vehicle_id, vehicle_name, slack_user_id, session, slack_session } = req.body || {};
+  const { vehicle_id, vehicle_name, slack_user_id, slack_session } = req.body || {};
   if (!vehicle_id || !slack_user_id) return res.status(400).json({ detail: 'vehicle_id and slack_user_id are required' });
-  // Confused-deputy gate (both paths): slack_user_id must arrive paired
-  // with a server-issued HMAC session minted on a verified Slack OIDC
-  // callback for that id. Legacy clients send `session`; the new SPA
-  // sends `slack_session` — accept either.
-  if (!verifySession(slack_session || session, slack_user_id)) {
+  // Confused-deputy gate: slack_user_id must arrive paired with a
+  // server-issued HMAC session minted on a verified Slack OIDC callback
+  // for that id.
+  if (!verifySession(slack_session, slack_user_id)) {
     return res.status(403).json({ detail: 'Slack session expired or mismatched. Sign in with Slack again.' });
   }
   if (!SLACK_USER_ID_RE.test(slack_user_id)) return res.status(400).json({ detail: 'slack_user_id should look like U060NLFUM' });
 
+  // Need a session cookie — the cookie-bound user record holds the
+  // canonical refresh_token (set by /api/session/create on Tesla OAuth).
+  const cookieUser = loadUserBySession(readSessionCookie(req));
+  if (!cookieUser) return res.status(401).json({ detail: 'Not signed in — finish the Tesla OAuth flow first.' });
+
   const vid = String(vehicle_id);
   const vname = vehicle_name || 'Unknown';
   const isStub = isStubVehicle(vid);
-
-  // Cookie path wins: the SPA already OAuthed via /api/session/create, so
-  // the cookie-bound record holds the canonical refresh_token.
-  const cookieUser = loadUserBySession(readSessionCookie(req));
-  let recordId;
-  if (cookieUser) {
-    if (!isStub && (!cookieUser.refresh_token || cookieUser.refresh_invalidated_at)) {
-      return res.status(409).json({ detail: 'Tesla authorization missing or expired — re-authorize first.' });
-    }
-    const patch = { slack_user_id, vehicle_id: vid, vehicle_name: vname, ...FRESH_SUB_TELEMETRY };
-    // Stub vehicle → force the sentinel so the cron short-circuits
-    // (it branches on refresh_token === STUB_REFRESH_TOKEN before any
-    // Tesla call). Real vehicle → the record's refresh_token is kept.
-    if (isStub) patch.refresh_token = STUB_REFRESH_TOKEN;
-    patchUser(cookieUser.id, patch);
-    recordId = cookieUser.id;
-    clearOtherSubs(slack_user_id, cookieUser.id);
-  } else {
-    // Legacy body path — needs an explicit refresh_token. Validate it by
-    // exchanging once (Tesla rotates on every exchange, so persist the
-    // rotated value), then create a fresh record.
-    if (!refresh_token) return res.status(400).json({ detail: 'refresh_token is required (no session cookie)' });
-    let stored = STUB_REFRESH_TOKEN;
-    if (!isStub) {
-      let rotated;
-      try { rotated = await teslaTokenExchange({ grant_type: 'refresh_token', client_id: TESLA_APP_CLIENT_ID, refresh_token }); }
-      catch (e) { return res.status(400).json({ detail: 'Refresh token invalid: ' + e.message }); }
-      stored = rotated.refresh_token || refresh_token;
-    }
-    clearOtherSubs(slack_user_id, null);
-    recordId = createUser(blankUser({ slack_user_id, vehicle_id: vid, vehicle_name: vname, refresh_token: stored })).id;
+  if (!isStub && (!cookieUser.refresh_token || cookieUser.refresh_invalidated_at)) {
+    return res.status(409).json({ detail: 'Tesla authorization missing or expired — re-authorize first.' });
   }
-  console.log(`[notifications] enabled slack=${slack_user_id} vehicle=${vid} record=${recordId.slice(0, 8)} via=${cookieUser ? 'cookie' : 'body'}`);
+
+  const patch = { slack_user_id, vehicle_id: vid, vehicle_name: vname, ...FRESH_SUB_TELEMETRY };
+  // Stub vehicle → force the sentinel so the cron short-circuits (it
+  // branches on refresh_token === STUB_REFRESH_TOKEN before any Tesla
+  // call). Real vehicle → the record's refresh_token is kept.
+  if (isStub) patch.refresh_token = STUB_REFRESH_TOKEN;
+  patchUser(cookieUser.id, patch);
+  clearOtherSubs(slack_user_id, cookieUser.id);
+  console.log(`[notifications] enabled slack=${slack_user_id} vehicle=${vid} record=${cookieUser.id.slice(0, 8)}`);
 
   // Best-effort confirmation DM — failure doesn't undo the sub; surface
   // the error so the SPA can hint at it.
@@ -119,13 +100,13 @@ notificationsRouter.post('/api/notifications/enable', wrap(async (req, res) => {
     slack_user_id,
     `:car: Tesla sweeper notifications enabled for *${vname}*. I'll DM you 1, 2, and 3 days before each sweep at noon ET. Disable anytime at https://sweeper.bitvox.me/.`
   );
-  res.json({ enabled: true, id: recordId, test_dm_ok: dm.ok, test_dm_error: dm.error || null });
+  res.json({ enabled: true, id: cookieUser.id, test_dm_ok: dm.ok, test_dm_error: dm.error || null });
 }));
 
 notificationsRouter.post('/api/notifications/disable', wrap(async (req, res) => {
-  const { id, slack_user_id, session, slack_session } = req.body || {};
+  const { id, slack_user_id, slack_session } = req.body || {};
   if (!id || !slack_user_id) return res.status(400).json({ detail: 'id and slack_user_id required' });
-  if (!verifySession(slack_session || session, slack_user_id)) {
+  if (!verifySession(slack_session, slack_user_id)) {
     return res.status(403).json({ detail: 'Slack session expired or mismatched. Sign in with Slack again.' });
   }
   const user = loadUserById(id);
