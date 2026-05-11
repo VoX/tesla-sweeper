@@ -50,6 +50,18 @@ export function NotificationsPanel({ slackUserId, setSlackUserId, hasSlackSessio
             <label htmlFor="slack-user-id" style={{ marginTop: 8, display: 'block' }}>Slack User ID or Profile URL</label>
             <input
               id="slack-user-id"
+              name="slack-user-id"
+              type="text"
+              // Keep password managers / browser autofill off this field —
+              // they'll happily inject a saved "test account" value and that
+              // input event would overwrite the real slack id.
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              data-1p-ignore="true"
+              data-lpignore="true"
+              data-form-type="other"
               placeholder="U060NLFUM or paste your slack profile URL"
               value={slackUserId}
               onInput={e => setSlackUserId(parseSlackInput(e.target.value))}
