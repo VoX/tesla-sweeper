@@ -149,14 +149,27 @@ export default function App() {
     setSubscriptions(data.subscriptions || []);
   };
 
+  // Surface failures both inline (red text in the panel) AND as a toast —
+  // the inline error sits below the Enable button, which is often below
+  // the fold, so on its own it's easy to miss.
+  const notifFail = (msg) => { setNotifError(msg); showToast('❌ ' + msg); };
+
   const enableNotifications = async () => {
     setNotifError('');
     if (!/^U[A-Z0-9]+$/.test(slackUserId)) {
-      setNotifError('Slack user ID looks like U060NLFUM (Slack profile → ⋮ → Copy member ID)');
+      notifFail('Slack user ID looks like U060NLFUM (Slack profile → ⋮ → Copy member ID)');
       return;
     }
     const vid = selectedVehicle || vehicles?.[0]?.id;
-    if (!vid) { setNotifError('Need a connected vehicle first'); return; }
+    if (!vid) { notifFail('Need a connected vehicle first'); return; }
+    // The /enable confused-deputy gate needs a *live* Slack-OIDC HMAC
+    // (per-tab, ~30-min TTL) — having a saved slack_user_id in
+    // localStorage is not the same thing. Catch the empty case here so
+    // the failure is obvious instead of an opaque 403 below the fold.
+    if (!slackSession()) {
+      notifFail('Your Slack session expired (or you haven’t signed in this visit). Click "Sign in with Slack" / "Switch slack account" above, then Enable.');
+      return;
+    }
     setNotifLoading(true);
     try {
       const veh = vehicles.find(v => v.id === vid);
@@ -177,7 +190,7 @@ export default function App() {
           : '';
       showToast(`\u{1F514} Daily slack pings enabled for ${veh?.name || 'this vehicle'}${dmHint}`);
     } catch (e) {
-      setNotifError(e.message);
+      notifFail(e.message);
     } finally {
       setNotifLoading(false);
     }
@@ -190,7 +203,7 @@ export default function App() {
       await post('notifications/disable', { id: subId, slack_user_id: slackUserId, slack_session: slackSession() });
       await fetchSubscriptions(slackUserId);
     } catch (e) {
-      setNotifError(e.message);
+      notifFail(e.message);
     } finally {
       setNotifLoading(false);
     }
@@ -537,6 +550,7 @@ export default function App() {
                 <NotificationsPanel
                   slackUserId={slackUserId}
                   setSlackUserId={setSlackUserId}
+                  hasSlackSession={!!slackSession()}
                   enabledForThis={subscriptions?.find(s => s.vehicle_id === (selectedVehicle || vehicles[0].id))}
                   notifLoading={notifLoading}
                   notifError={notifError}
