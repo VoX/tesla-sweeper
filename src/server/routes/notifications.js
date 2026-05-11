@@ -21,7 +21,7 @@ import {
   loadUsers, loadUserById, loadUserBySession, loadSubscribedUsers, publicUser,
 } from '../store/users.js';
 import { readSessionCookie } from '../util/session.js';
-import { STUB_REFRESH_TOKEN, isStubVehicle } from '../integrations/tesla.js';
+import { isStubVehicle } from '../integrations/tesla.js';
 import { postSlackDM } from '../integrations/slack.js';
 import { runNotifications } from '../notifications/cron.js';
 
@@ -85,11 +85,10 @@ notificationsRouter.post('/api/notifications/enable', wrap(async (req, res) => {
     return res.status(409).json({ detail: 'Tesla authorization missing or expired — re-authorize first.' });
   }
 
+  // The record's refresh_token (set by /session/create) is preserved —
+  // the cron's stub short-circuit detects the stub by vehicle_id, not
+  // by the token, so we don't need to clobber a real RT here.
   const patch = { slack_user_id, vehicle_id: vid, vehicle_name: vname, ...FRESH_SUB_TELEMETRY };
-  // Stub vehicle → force the sentinel so the cron short-circuits (it
-  // branches on refresh_token === STUB_REFRESH_TOKEN before any Tesla
-  // call). Real vehicle → the record's refresh_token is kept.
-  if (isStub) patch.refresh_token = STUB_REFRESH_TOKEN;
   patchUser(cookieUser.id, patch);
   clearOtherSubs(slack_user_id, cookieUser.id);
   console.log(`[notifications] enabled slack=${slack_user_id} vehicle=${vid} record=${cookieUser.id.slice(0, 8)}`);

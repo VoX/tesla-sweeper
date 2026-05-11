@@ -84,12 +84,12 @@ export const sessionRouter = Router();
 sessionRouter.post('/api/session/create', wrap(async (req, res) => {
   const { code, state } = req.body || {};
   if (!code) return res.status(400).json({ detail: 'code required' });
-  if (!consumeState(state, 'tesla')) return res.status(400).json({ detail: 'invalid or expired state' });
-
   // Mint the cookie up front: if SESSION_HMAC_KEY is unset, bail BEFORE
-  // burning the one-shot OAuth `code` at Tesla.
+  // burning the one-shot OAuth `state` (and the one-shot OAuth `code` at
+  // Tesla). Cheap to mint a sid even if we end up not using it.
   const { sid, signed } = mintSessionId();
   if (!signed) return res.status(503).json({ detail: 'Session signing unavailable (SESSION_HMAC_KEY unset)' });
+  if (!consumeState(state, 'tesla')) return res.status(400).json({ detail: 'invalid or expired state' });
 
   const tokenData = await teslaTokenExchange({
     grant_type: 'authorization_code', client_id: TESLA_CLIENT_ID, client_secret: TESLA_CLIENT_SECRET,
@@ -135,26 +135,24 @@ sessionRouter.post('/api/session/create', wrap(async (req, res) => {
 sessionRouter.post('/api/session/destroy', wrap(async (req, res) => {
   const sid = readSessionCookie(req);
   clearSessionCookie(res); // always clear the browser cookie, even for a junk/absent sid
-  if (sid) {
-    const user = loadUserBySession(sid);
-    if (user) {
-      const subRetained = !!(user.slack_user_id && user.vehicle_id);
-      patchUser(user.id, { session_cookie_id: null });
-      console.log(`[session] destroyed sid=${sid8(sid)}${subRetained ? ' (sub retained)' : ''}`);
-      // No notification sub uses this record's token → it's now orphaned.
-      // Best-effort revoke at Tesla so a stolen-laptop logout actually
-      // kills the credential server-side, then null it locally. If a sub
-      // DOES use it, leave the token alone — the cron needs it.
-      if (!subRetained && user.refresh_token && !user.refresh_invalidated_at) {
-        try {
-          const r = await fetchWithTimeout(TESLA_REVOKE_URL, {
-            method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({ token: user.refresh_token, token_type_hint: 'refresh_token', client_id: TESLA_CLIENT_ID }).toString(),
-          });
-          if (!r.ok) console.warn(`[session] token revoke returned ${r.status} (best-effort, ignoring)`);
-        } catch (e) { console.warn(`[session] token revoke failed: ${e.message} (best-effort, ignoring)`); }
-        patchUser(user.id, { refresh_token: null, access_token: null, access_expires_at: null });
-      }
+  const user = loadUserBySession(sid);
+  if (user) {
+    const subRetained = !!(user.slack_user_id && user.vehicle_id);
+    patchUser(user.id, { session_cookie_id: null });
+    console.log(`[session] destroyed sid=${sid8(sid)}${subRetained ? ' (sub retained)' : ''}`);
+    // No notification sub uses this record's token → it's now orphaned.
+    // Best-effort revoke at Tesla so a stolen-laptop logout actually
+    // kills the credential server-side, then null it locally. If a sub
+    // DOES use it, leave the token alone — the cron needs it.
+    if (!subRetained && user.refresh_token && !user.refresh_invalidated_at) {
+      try {
+        const r = await fetchWithTimeout(TESLA_REVOKE_URL, {
+          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ token: user.refresh_token, token_type_hint: 'refresh_token', client_id: TESLA_CLIENT_ID }).toString(),
+        });
+        if (!r.ok) console.warn(`[session] token revoke returned ${r.status} (best-effort, ignoring)`);
+      } catch (e) { console.warn(`[session] token revoke failed: ${e.message} (best-effort, ignoring)`); }
+      patchUser(user.id, { refresh_token: null, access_token: null, access_expires_at: null });
     }
   }
   res.status(204).end();

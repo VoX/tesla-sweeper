@@ -113,8 +113,7 @@ async function refreshOnce(userId) {
 
   if (res.status >= 500) throw new TransientError(`Tesla token endpoint ${res.status}`);
 
-  let body;
-  try { body = await res.json(); } catch { body = {}; }
+  const body = await res.json().catch(() => ({}));
 
   if (!res.ok) {
     if (body.error === 'invalid_grant') {

@@ -16,6 +16,9 @@ vi.mock('../integrations/tesla.js', () => ({
   STUB_REFRESH_TOKEN: 'STUB_REFRESH_TOKEN',
   STUB_VEHICLE_LAT: 42.385,
   STUB_VEHICLE_LNG: -71.108,
+  // The stub-detection moved from token-based to vehicle-id-based — the
+  // SUB fixture below has vehicle_id = '999999999999999' (the stub id).
+  isStubVehicle: (id) => String(id) === '999999999999999',
   fetchVehicleData: vi.fn(),
 }));
 
@@ -105,7 +108,10 @@ describe('runNotifications stub vehicle short-circuit', () => {
 
 describe('runNotifications real (non-stub) vehicle path', () => {
   it('goes through getTeslaAccess for a real refresh_token and uses the access_token in the vehicle_data call', async () => {
-    loadSubscribedUsers.mockReturnValue([{ ...SUB, refresh_token: 'RT_real' }]);
+    // Override vehicle_id to a non-stub id — the stub short-circuit is keyed
+    // on vehicle_id (not refresh_token), so SUB's '999999999999999' would
+    // route this to the stub path and skip the Tesla calls under test.
+    loadSubscribedUsers.mockReturnValue([{ ...SUB, vehicle_id: '1234567890123456', refresh_token: 'RT_real' }]);
     getTeslaAccess.mockResolvedValue('AT_live');
     fetchVehicleData.mockResolvedValue({ response: {
       drive_state: { latitude: 42.385, longitude: -71.108 },
@@ -115,14 +121,14 @@ describe('runNotifications real (non-stub) vehicle path', () => {
     expect(getTeslaAccess).toHaveBeenCalledWith('sub1');
     expect(fetchVehicleData).toHaveBeenCalledWith(
       expect.objectContaining({ Authorization: 'Bearer AT_live' }),
-      '999999999999999',
+      '1234567890123456',
     );
     expect(out.results[0].ok).toBe(true);
     expect(out.results[0].battery_level).toBe(64);
   });
 
   it('surfaces a getTeslaAccess failure as a per-sub error + bumps consecutive_failures', async () => {
-    loadSubscribedUsers.mockReturnValue([{ ...SUB, refresh_token: 'RT_dead', consecutive_failures: 0 }]);
+    loadSubscribedUsers.mockReturnValue([{ ...SUB, vehicle_id: '1234567890123456', refresh_token: 'RT_dead', consecutive_failures: 0 }]);
     getTeslaAccess.mockRejectedValue(new Error('Tesla refused the refresh_token: invalid_grant'));
     const out = await runNotifications({ mode: 'daily' });
     expect(out.results[0].ok).toBe(false);
@@ -142,7 +148,6 @@ describe('runNotifications dispatch', () => {
     // dispatch loop were deleted.
     expect(postSlackDM).toHaveBeenCalledWith('U060NLFUM', expect.stringContaining('Move'));
     // And persisted last_dm_date so a same-day re-run dedupes.
-    const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
     expect(patchUser).toHaveBeenCalledWith('sub1', { last_dm_date: todayET });
   });
 
@@ -161,8 +166,7 @@ describe('runNotifications dispatch', () => {
 
   it('weekly mode uses last_digest_date for dedup', async () => {
     // Pre-set last_digest_date to today's ET date so the dedup branch skips
-    // the DM. Today's ET-format date:
-    const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+    // the DM.
     loadSubscribedUsers.mockReturnValue([{ ...SUB, last_digest_date: todayET }]);
     const out = await runNotifications({ mode: 'weekly' });
     expect(out.results[0].digest_skipped).toBe('already-sent-today');

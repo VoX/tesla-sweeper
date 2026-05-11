@@ -470,8 +470,10 @@ export default function App() {
           showToast('❌ Slack sign-in failed: ' + e.message);
         })
         .finally(() => { setNotifLoading(false); setAuthChecked(true); });
-      // The Slack callback doesn't establish a Tesla session — still ask.
-      checkSession();
+      // Don't call checkSession() here — it would race the slack `.then`
+      // and could clobber the freshly-set slackUserId with the (possibly
+      // stale) slack_user_id from /me's user record. The Tesla cookie
+      // (if any) is re-bootstrapped on the next normal page load.
       return;
     }
 

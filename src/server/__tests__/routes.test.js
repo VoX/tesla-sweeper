@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import request from 'supertest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -189,18 +189,15 @@ describe('POST /api/slack/oauth/callback — id_token claim verification', () =>
   });
 
   const realFetch = globalThis.fetch;
-  beforeAll(() => {});
-  // Each test installs its own fetch stub then restores.
   const withSlackResponse = (claims) => {
     globalThis.fetch = vi.fn().mockResolvedValueOnce(slackTokenRes(claims));
   };
-  const restore = () => { globalThis.fetch = realFetch; };
+  afterEach(() => { globalThis.fetch = realFetch; });
 
   it('rejects an id_token with a wrong issuer', async () => {
     const start = await request(app).post('/api/slack/oauth/start').send({});
     withSlackResponse({ iss: 'https://attacker.example', aud: 'test-slack-client', exp: Math.floor(Date.now()/1000) + 60, 'https://slack.com/user_id': 'U1' });
     const r = await request(app).post('/api/slack/oauth/callback').send({ code: 'c', state: start.body.state });
-    restore();
     expect(r.status).toBe(502); // wrap() converts thrown errors to 502 upstream-error
   });
 
@@ -208,7 +205,6 @@ describe('POST /api/slack/oauth/callback — id_token claim verification', () =>
     const start = await request(app).post('/api/slack/oauth/start').send({});
     withSlackResponse({ iss: 'https://slack.com', aud: 'someone-else', exp: Math.floor(Date.now()/1000) + 60, 'https://slack.com/user_id': 'U1' });
     const r = await request(app).post('/api/slack/oauth/callback').send({ code: 'c', state: start.body.state });
-    restore();
     expect(r.status).toBe(502);
   });
 
@@ -216,7 +212,6 @@ describe('POST /api/slack/oauth/callback — id_token claim verification', () =>
     const start = await request(app).post('/api/slack/oauth/start').send({});
     withSlackResponse({ iss: 'https://slack.com', aud: 'test-slack-client', exp: Math.floor(Date.now()/1000) - 60, 'https://slack.com/user_id': 'U1' });
     const r = await request(app).post('/api/slack/oauth/callback').send({ code: 'c', state: start.body.state });
-    restore();
     expect(r.status).toBe(502);
   });
 
@@ -224,7 +219,6 @@ describe('POST /api/slack/oauth/callback — id_token claim verification', () =>
     const start = await request(app).post('/api/slack/oauth/start').send({});
     withSlackResponse({ iss: 'https://slack.com', aud: 'test-slack-client', exp: Math.floor(Date.now()/1000) + 60, 'https://slack.com/user_id': 'U060NLFUM', name: 'Test' });
     const r = await request(app).post('/api/slack/oauth/callback').send({ code: 'c', state: start.body.state });
-    restore();
     expect(r.status).toBe(200);
     expect(r.body.slack_user_id).toBe('U060NLFUM');
     expect(r.body.session).toBeTruthy();

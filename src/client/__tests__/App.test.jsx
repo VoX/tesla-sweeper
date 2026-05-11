@@ -39,21 +39,20 @@ afterEach(() => {
   cleanup();
   globalThis.fetch = realFetch;
   vi.restoreAllMocks();
-  vi.useRealTimers();
 });
 
 const tick = (ms = 50) => new Promise(r => setTimeout(r, ms));
 
-async function importApp() {
-  const m = await import('../App.jsx');
-  return m.default;
+async function renderApp() {
+  const App = (await import('../App.jsx')).default;
+  const out = render(<App />);
+  await tick();
+  return out;
 }
 
 describe('App', () => {
   it('asks /api/session/me on mount and shows the Tesla connect button when unauthenticated', async () => {
-    const App = await importApp();
-    const { container } = render(<App />);
-    await tick();
+    const { container } = await renderApp();
     // /api/session/me was the mount probe.
     expect(globalThis.fetch.mock.calls.some(([u]) => String(u).includes('session/me'))).toBe(true);
     // No /api/vehicles fetch since the session probe came back unauthenticated.
@@ -69,9 +68,7 @@ describe('App', () => {
       'session/me': { authenticated: true, slack_user_id: null, vehicle_id: null, vehicle_name: null },
       '/api/vehicles': { vehicles: [] },
     };
-    const App = await importApp();
-    const { container } = render(<App />);
-    await tick();
+    const { container } = await renderApp();
     expect(globalThis.fetch.mock.calls.some(([u]) => String(u).includes('/api/vehicles'))).toBe(true);
     // Connected view: the "Disconnect" button is present, the "Connect" one isn't.
     const btns = Array.from(container.querySelectorAll('button')).map(b => b.textContent);
@@ -87,9 +84,7 @@ describe('App', () => {
         { id: '999999999999999', name: 'Test Vehicle', vin: 'V2', state: 'online', is_stub: true },
       ] },
     };
-    const App = await importApp();
-    const { container } = render(<App />);
-    await tick();
+    const { container } = await renderApp();
     const select = container.querySelector('select');
     expect(select).toBeTruthy();
     const opts = Array.from(select.querySelectorAll('option')).map(o => o.textContent);
@@ -103,9 +98,7 @@ describe('App', () => {
       '/api/vehicles': { vehicles: [{ id: '111', name: 'Car', vin: 'V', state: 'asleep' }] },
       'notifications/status': { subscriptions: [] },
     };
-    const App = await importApp();
-    const { container } = render(<App />);
-    await tick();
+    const { container } = await renderApp();
     // No manual slack-id field — the id comes only from "Sign in with Slack".
     expect(container.querySelector('#slack-user-id')).toBeNull();
     const enableBtn = Array.from(container.querySelectorAll('button')).find(b => /enable daily/i.test(b.textContent));

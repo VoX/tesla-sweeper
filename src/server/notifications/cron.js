@@ -5,10 +5,10 @@
 
 import cron from 'node-cron';
 import { classifyWeek, shouldDispatchPlan, formatPlanDM, formatWeeklyDigest } from './planner.js';
-import { loadStore, saveStore, patchUser, loadSubscribedUsers } from '../store/users.js';
+import { loadStore, saveStore, patchUser, loadSubscribedUsers, pruneOrphaned } from '../store/users.js';
 import {
-  STUB_VEHICLE_ENABLED, STUB_REFRESH_TOKEN, STUB_VEHICLE_LAT, STUB_VEHICLE_LNG,
-  fetchVehicleData,
+  STUB_VEHICLE_LAT, STUB_VEHICLE_LNG,
+  isStubVehicle, fetchVehicleData,
 } from '../integrations/tesla.js';
 import { getTeslaAccess } from '../integrations/tesla-auth.js';
 import { reverseGeocodeLocation } from '../integrations/nominatim.js';
@@ -39,9 +39,13 @@ export async function runNotifications({ mode = 'daily' } = {}) {
       const out = { sub_id: sub.id, slack_user_id: sub.slack_user_id, vehicle_id: sub.vehicle_id, vehicle_name: sub.vehicle_name };
       try {
         let latitude, longitude;
-        if (STUB_VEHICLE_ENABLED && sub.refresh_token === STUB_REFRESH_TOKEN) {
+        if (isStubVehicle(sub.vehicle_id)) {
           // Stub: skip Tesla token refresh + vehicle_data wake-and-poll.
           // Reverse-geocode + Recollect + Slack DM still run for real.
+          // (Detection is vehicle-id based — formerly token-based — so a
+          // user with a real refresh_token who subscribed to the stub
+          // still short-circuits without the route having to overwrite
+          // their real token with the sentinel.)
           latitude = STUB_VEHICLE_LAT;
           longitude = STUB_VEHICLE_LNG;
           out.battery_level = 78;
@@ -105,7 +109,7 @@ export async function runNotifications({ mode = 'daily' } = {}) {
       out.last_dm_date = sub.last_dm_date || null;
       out.last_digest_date = sub.last_digest_date || null;
       out.plan = (out.ok && out.found) ? classifyWeek({
-        events: out.sweep_events || [], carSide: out.car_side,
+        events: out.sweep_events, carSide: out.car_side,
         sideDetection: out.side_detection, todayET,
       }) : null;
       results.push(out);
@@ -196,6 +200,13 @@ export function startNotificationCron() {
       console.log(`[cron] digest subs=${r.results.length} sent=${sent} dup=${dup} errs=${errs.length}`);
       for (const o of errs) console.warn(`[cron] digest sub ${o.sub_id} error: ${o.error}`);
     } catch (e) { console.error('[cron] weekly digest failed:', e); }
+  }, { timezone: 'America/New_York' });
+
+  // Daily 3 AM ET: prune orphaned records (no cookie, no sub, inactive
+  // > 30 days). Keeps `users.json` from growing on synthetic-id re-OAuths
+  // and abandoned logged-in-only sessions.
+  cron.schedule('0 3 * * *', () => {
+    try { pruneOrphaned(); } catch (e) { console.error('[cron] pruneOrphaned failed:', e); }
   }, { timezone: 'America/New_York' });
 }
 

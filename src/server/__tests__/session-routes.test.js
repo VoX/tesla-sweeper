@@ -173,11 +173,10 @@ describe('GET /api/session/me', () => {
   });
 
   it('returns the sub fields for a valid cookie', async () => {
-    const state = mintState('tesla');
-    const created = await request(app).post('/api/session/create').send({ code: 'c', state });
+    const cookie = await loginCookie();
     // Simulate a /enable having populated the sub fields on the bound record.
     patchUser(loadUsers()[0].id, { slack_user_id: 'U060NLFUM', vehicle_id: '1234567890123456', vehicle_name: 'My Tesla' });
-    const res = await request(app).get('/api/session/me').set('Cookie', sessionValue(created));
+    const res = await request(app).get('/api/session/me').set('Cookie', cookie);
     expect(res.body).toEqual({ authenticated: true, slack_user_id: 'U060NLFUM', vehicle_id: '1234567890123456', vehicle_name: 'My Tesla' });
   });
 });
@@ -190,9 +189,8 @@ describe('POST /api/session/destroy', () => {
   });
 
   it('orphaned record (no sub): unbinds, best-effort revokes, nulls the token', async () => {
-    const state = mintState('tesla');
-    const created = await request(app).post('/api/session/create').send({ code: 'c', state });
-    const res = await request(app).post('/api/session/destroy').set('Cookie', sessionValue(created));
+    const cookie = await loginCookie();
+    const res = await request(app).post('/api/session/destroy').set('Cookie', cookie);
     expect(res.status).toBe(204);
     expect(res.headers['set-cookie'][0]).toMatch(/^session=;/);
     const u = loadUsers()[0];
@@ -203,10 +201,9 @@ describe('POST /api/session/destroy', () => {
   });
 
   it('record with an active sub: unbinds the cookie but PRESERVES the token (cron needs it), no revoke', async () => {
-    const state = mintState('tesla');
-    const created = await request(app).post('/api/session/create').send({ code: 'c', state });
+    const cookie = await loginCookie();
     patchUser(loadUsers()[0].id, { slack_user_id: 'U060NLFUM', vehicle_id: '1234567890123456' });
-    const res = await request(app).post('/api/session/destroy').set('Cookie', sessionValue(created));
+    const res = await request(app).post('/api/session/destroy').set('Cookie', cookie);
     expect(res.status).toBe(204);
     const u = loadUsers()[0];
     expect(u.session_cookie_id).toBeNull();
