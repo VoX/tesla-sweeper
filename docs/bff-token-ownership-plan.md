@@ -137,6 +137,49 @@ Same helper, same rotation logic, same single-flight, same retry classification.
 Each phase is independently shippable, with backwards-compat coexistence so
 existing flows don't break mid-migration.
 
+### Phase 0 — Subdomain migration: claw.bitvox.me/sweeper → sweeper.bitvox.me
+
+**Why first**: moving to a dedicated origin makes CSRF protection unnecessary
+(sibling apps on `claw.bitvox.me` are no longer same-origin → Same-Origin
+Policy + CORS handle the threats by themselves) and lets the cookie scope
+be host-only with no path tricks. Doing this before the cookie work avoids
+designing around an isolation problem we're going to remove anyway.
+
+Steps:
+1. **DNS**: `sweeper.bitvox.me` CNAME → `claw.bitvox.me`. Cloudflare,
+   not proxied, TTL=auto. **DONE** as part of preparing this plan
+   (record id `e8f5d5021f4440310e6bfbd12a0ac739`).
+2. **Caddy**: add a new `sweeper.bitvox.me { reverse_proxy localhost:20040 }`
+   block to `/etc/caddy/Caddyfile`. Same backend the existing
+   `/sweeper/*` `handle_path` proxies to. Reload caddy.
+3. **Caddy redirect**: change the existing `claw.bitvox.me /sweeper/*` block
+   to a `redir https://sweeper.bitvox.me{uri/} 308` that strips the
+   `/sweeper` prefix. Bookmarks of the old URL keep working; everything
+   funnels through the new origin.
+4. **SPA paths**: drop the `import.meta.env.DEV ? '/sweeper/api' : 'api'`
+   ternary in `lib/api.js`. Under the new origin, `/api/...` is always the
+   same-origin path. Set `vite.config.js`'s base path to `/` (was probably
+   `/sweeper/` for build-time asset paths).
+5. **Hardcoded URL audit**: grep for `claw.bitvox.me/sweeper` in the
+   codebase. Update each callsite to `sweeper.bitvox.me`. Known sites:
+   - `src/server/notifications/planner.js` (`APP_URL` constant in DM body)
+   - `src/server/routes/notifications.js` (one DM template line)
+   - `src/server/util/fetch.js` (UA contact URL — keep claw.bitvox.me here? actually update for consistency)
+   - `README.md` / `CLAUDE.md` references
+6. **OAuth redirect URI**: Tesla OAuth + Slack OAuth both register a
+   `redirect_uri` in their respective developer consoles, currently pointing
+   at `https://claw.bitvox.me/sweeper/`. Update both to
+   `https://sweeper.bitvox.me/`. Keep both registered for one release so
+   in-flight OAuth flows from the old URL still complete.
+7. **`.env` updates**: `TESLA_REDIRECT_URI` + `SLACK_REDIRECT_URI` env vars
+   to the new URL.
+8. **Verification**: `curl https://sweeper.bitvox.me/api/notifications/status?slack_user_id=U060NLFUM` → 200 with subs list. `curl -L https://claw.bitvox.me/sweeper/` → 308 → 200 from the new host.
+9. **Backwards compat window**: leave the redirect in place for ~1 month,
+   then remove the `handle_path /sweeper/*` block from caddy.
+
+This phase touches deploy state (caddy reload, OAuth console updates) so it
+needs an explicit window. Coordinate with VoX before reloading caddy.
+
 ### Phase 1 — Schema migration: subscriptions.json → users.json
 
 Rename `data/subscriptions.json` → `data/users.json` and add the new fields.
@@ -202,7 +245,7 @@ returning, so the rest of the cron loop can crash without losing the rotation.
 
 Stub-vehicle short-circuit unchanged.
 
-### Phase 4 — Add session cookie machinery + CSRF protection
+### Phase 4 — Add session cookie machinery
 
 Add `cookie-parser` middleware in `src/server/app.js` (small dep, ~3-line
 change in app.js + one entry in `src/server/package.json`).
@@ -219,49 +262,38 @@ mintSessionCookieId()   // sid = crypto.randomBytes(32).toString('base64url')
 readSessionCookie(req)  // verify HMAC, return sid or null
 setSessionCookie(res, signedId)
 //   Set-Cookie: session=<sid>.<hmac>; HttpOnly; Secure;
-//                SameSite=Lax; Path=/sweeper/; Max-Age=2592000
+//                SameSite=Lax; Max-Age=2592000
+//   (host-only, no Domain/Path attrs needed — sweeper.bitvox.me is its
+//    own origin under Phase 0, so default scoping is exactly right.)
 clearSessionCookie(res)
-mintCsrfCookie(res)
-//   Set-Cookie: csrf=<random32>; Secure; SameSite=Lax; Path=/sweeper/;
-//                Max-Age=2592000
-//   NOT HttpOnly so SPA JS can read it via document.cookie.
-readCsrfCookie(req)  // value from req.cookies.csrf
 ```
 
 `SameSite=Lax` rather than `Strict`: Strict drops the cookie on the OAuth
 return-redirect from `auth.tesla.com`, breaking the callback. Lax preserves
 the cookie on top-level navigations including OAuth redirects, while still
-blocking cross-origin POST attacks. **Path is scoped to `/sweeper/`** so
-sibling apps on `claw.bitvox.me` (cowgame, transcripts, bmo, sprite-review,
-etc.) cannot read the cookie via `document.cookie` (path-scope blocks JS
-read on a different sub-path).
+blocking cross-site POST attacks (which is the entire CSRF surface now that
+we're on a dedicated origin).
 
-#### CSRF protection (must, not optional)
+#### Why no CSRF middleware
 
-`claw.bitvox.me` hosts ~10 sub-apps under different paths. Cookies are scoped
-to `Path=/sweeper/`, so other apps' JS can't *read* the session cookie. But
-under same-site rules the browser still *attaches* the cookie when JS on
-those apps makes a `fetch('/sweeper/api/...', { credentials: 'include' })`.
-Stored XSS in any sibling app would let it act as the user.
+After Phase 0, `sweeper.bitvox.me` is a different origin from every sibling
+app on `claw.bitvox.me`. CSRF protection is provided by:
+- **SameSite=Lax cookie**: browsers do not include the session cookie on
+  cross-site `fetch`/`XHR`/`form-POST` requests. Sibling apps' JS cannot
+  POST to our endpoints with credentials attached.
+- **CORS default-deny**: our server doesn't set `Access-Control-Allow-
+  Origin` for sibling origins, so cross-origin `fetch` with
+  `credentials: 'include'` fails the browser's preflight check before the
+  request leaves the user's machine.
+- **Same-Origin Policy on iframes**: a sibling app embedding
+  `<iframe src="https://sweeper.bitvox.me/">` cannot read
+  `iframe.contentWindow.document.cookie` (cross-origin frame access is
+  blocked).
 
-Mitigation — double-submit CSRF cookie:
-- On `/api/session/create` mint two cookies: `session` (HttpOnly) AND `csrf`
-  (NOT HttpOnly, both Path=/sweeper/).
-- New middleware `requireCsrf` in `src/server/middleware/csrf.js` runs on
-  every state-changing route under `/api/`. Checks `X-CSRF-Token` header
-  matches `req.cookies.csrf` via `crypto.timingSafeEqual`. 403 on mismatch.
-- SPA reads the csrf cookie via `document.cookie`, includes
-  `X-CSRF-Token: <value>` on every POST/DELETE.
-
-Sibling apps cannot read the csrf cookie (path scope blocks JS access from a
-different sub-path), so they can't synthesize the matching header.
-
-GETs are exempted (the only sensitive GET is `/api/notifications/status` and
-`/api/session/me`, which leak slack id + vehicle name only — acceptable
-read surface).
-
-The `/api/notifications/run` bearer-token endpoint and `/api/oauth/app/start`
-are exempted from CSRF (they don't use the session cookie).
+The double-submit CSRF cookie pattern from earlier plan revisions is
+**dropped** — it was specifically a mitigation for the same-origin sibling
+problem under `/sweeper/`. Subdomain isolation removes the threat at the
+browser level.
 
 ### Phase 5 — New auth endpoints
 
@@ -273,12 +305,12 @@ POST /api/session/create
   response: 200, body: { vehicles: [...] }  # SPA needs the list anyway
 
 POST /api/session/destroy
-  cookie: session=<id>; csrf=<token> + X-CSRF-Token header
+  cookie: session=<id>
   effect: clear session_cookie_id on the user record (sub fields preserved
           if present); best-effort POST to Tesla's revoke endpoint
           (https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/revoke) so a
           stolen-laptop wipe actually kills the credential server-side too;
-          clear both cookies
+          clear cookie
   response: 204
   Note: revocation is best-effort — log + swallow any failure. The
   subscription's refresh_token is intentionally NOT revoked (one record /
@@ -328,13 +360,12 @@ later enables for vehicle B, the second call overwrites the first. **One
 sub per user**, deliberately. Multi-vehicle support is a separate feature and
 out of scope (see Out of scope).
 
-**Backwards compat for one release** — applies to BOTH the body shape AND the
-auth source. Each tesla-touching route in this phase accepts EITHER:
+**Backwards compat for one release** — each tesla-touching route in this
+phase accepts EITHER:
 
-- Cookie path: session cookie + `X-CSRF-Token` header. Body has no
-  `refresh_token`/`token` field.
+- Cookie path: session cookie. Body has no `refresh_token`/`token` field.
 - Legacy body path: `{ token, refresh_token, ...other-fields }` exactly as
-  today. No CSRF check (legacy SPAs don't have the csrf cookie).
+  today.
 
 `/api/notifications/enable` specifically: under cookie-path the body is
 `{ vehicle_id, vehicle_name, slack_user_id, slack_session }` (no
@@ -349,7 +380,7 @@ every logged-in user gets 400s on `/api/vehicles` and `/api/check`. The PR
 description for Phase 7 must include "verified Phase 6 server is deployed."
 
 After SPA migration ships and a couple of weeks pass with no fallback hits in
-logs, remove the legacy body path AND the no-csrf compat path.
+logs, remove the legacy body path.
 
 ### Phase 7 — SPA migration
 
@@ -370,17 +401,15 @@ In `src/client/`:
   re-enable.
 - All existing API calls drop the `token` body field. `lib/api.js` is
   modified centrally (the two helpers `post` and `get`, NOT per call site)
-  to add `credentials: 'include'` and pull `X-CSRF-Token` from the csrf
-  cookie via `document.cookie`. Two-line change in api.js, no per-call
-  changes.
+  to add `credentials: 'include'`. Single-line change per helper. SPA is
+  same-origin with the API now (Phase 0) so no extra CORS dance needed.
 - Logout button calls `/api/session/destroy`, then SPA clears its in-memory
   state. Logout confirmation surfaces "your noon notifications are still
   active — go to the Notifications panel to disable separately if you want
   them off." (Sub-state survives logout under the shared-record model.)
 - 401 handling: server returns `{ session_expired: true }` for any of
   {cookie absent, cookie HMAC invalid, refresh revoked}. SPA collapses all
-  three into the same UX (re-OAuth). 403 on csrf mismatch is logged + the
-  user sees a generic "session expired" with the same re-OAuth path.
+  three into the same UX (re-OAuth).
 - OAuth state TTL UX: server returns `400 { detail: 'state expired' }` when
   the user takes >10 min between `/start` and `/session/create`. SPA shows
   "session setup expired, log in again" and routes back to OAuth start.
@@ -421,11 +450,16 @@ Delete the `.subscriptions.json.pre-bff` safety-net file from disk.
 | `src/server/routes/oauth.js` | delete `/api/oauth/app/refresh`; keep start, redirect callback to /session/create | -25 |
 | `src/server/notifications/cron.js` | replace inline exchange with `getTeslaAccess` | ~15 changes |
 | `src/client/App.jsx` | drop tokens state + refreshToken + 60s polling effect + tokens-loaded effect + 401-retry blocks + OAuth callback rewire + me-bootstrap | ~150 touched, net -100 |
-| `src/client/lib/api.js` | edit `post` + `get` helpers (NOT per call): `credentials: 'include'` + `X-CSRF-Token` header pull from `document.cookie` | +6 |
+| `src/client/lib/api.js` | edit `post` + `get` helpers (NOT per call): `credentials: 'include'`; drop the `/sweeper/api` vs `api` ternary (Phase 0 makes it always `/api`) | +3 / -2 |
 | `src/client/__tests__/App.test.jsx` | rewrite 3 tests that seed `localStorage.tesla_tokens` to seed `/api/session/me` mock instead | ~30 changes |
-| `src/server/middleware/csrf.js` | NEW double-submit verifier | ~25 |
-| Tests (users + tesla-auth + session routes + csrf middleware + retry classifier) | NEW | ~250 |
+| Tests (users + tesla-auth + session routes + retry classifier) | NEW | ~200 |
 | `src/server/package.json` | add `cookie-parser` dep | +1 |
+| `/etc/caddy/Caddyfile` (deploy step, not in repo) | add `sweeper.bitvox.me` block; convert `claw.bitvox.me /sweeper/*` to 308 redirect | +8 / -3 |
+| `vite.config.js` | base path `/sweeper/` → `/` | 1 line |
+| `src/server/notifications/planner.js` | `APP_URL` constant | 1 line |
+| `src/server/util/fetch.js` | UA contact URL | 1 line |
+| `.env` (deploy state, not in repo) | `TESLA_REDIRECT_URI`, `SLACK_REDIRECT_URI` | 2 lines |
+| Tesla + Slack OAuth dev consoles | redirect URI registered for new origin | external |
 
 Net: roughly +500 / -200 lines. ~8-10 hours of focused work spread across
 phases 1-8.
@@ -508,12 +542,11 @@ by phase 2's retry classification — only `invalid_grant` invalidates; 5xx
 retries 3× then leaves the record intact for the next attempt. Without this
 fix, a 502 wave would nuke every record.
 
-**Risk: Cross-app CSRF via sibling apps on `claw.bitvox.me`.** Same-site
-cookie semantics mean a sibling app's stored XSS could fetch our endpoints
-with the session cookie attached. Mitigated by the double-submit CSRF
-pattern (csrf cookie scoped to `/sweeper/`, sibling JS can't read it,
-sibling-issued requests can't synthesize the matching `X-CSRF-Token`
-header). Mandatory; not optional.
+**Risk: Cross-app CSRF via sibling apps on `claw.bitvox.me`.** Eliminated
+by Phase 0's subdomain migration. `sweeper.bitvox.me` is a different
+origin from every sibling app, so SameSite=Lax + CORS + Same-Origin Policy
+collectively block the entire CSRF + iframe-cookie-read attack class at
+the browser level — no application-layer CSRF token needed.
 
 **Risk: Stolen-laptop logout doesn't fully kill the Tesla credential.**
 Mitigated by the best-effort revoke call in `/session/destroy`. Failure
@@ -600,13 +633,19 @@ given moment.
 
 ## Phase ordering rationale
 
-1. Phase 1 (schema migration) lays the data shape; everything else depends on it.
-2. Phases 2-4 are additive — no caller changes, modules accumulate.
-3. Phase 3 (cron uses `getTeslaAccess`) is the smallest behavior change and surfaces any helper bugs early.
-4. Phase 5 (new endpoints) adds new routes without removing old ones.
-5. Phase 6's coexistence (cookie OR body) is the key risk-reducer.
-6. Phase 7 is the only phase that touches user-visible behavior, reversible from a single commit.
-7. Phase 8 is cleanup, post-observation.
+1. **Phase 0 (subdomain migration)** lays the origin so every later cookie
+   decision is made on a clean dedicated origin. Doing it first removes the
+   need for CSRF middleware entirely.
+2. **Phase 1 (schema migration)** lays the data shape; everything else
+   depends on it.
+3. **Phases 2-4** are additive — no caller changes, modules accumulate.
+4. **Phase 3 (cron uses `getTeslaAccess`)** is the smallest behavior change
+   and surfaces any helper bugs early.
+5. **Phase 5 (new endpoints)** adds new routes without removing old ones.
+6. **Phase 6's coexistence (cookie OR body)** is the key risk-reducer.
+7. **Phase 7** is the only phase that touches user-visible behavior,
+   reversible from a single commit.
+8. **Phase 8** is cleanup, post-observation.
 
 If at any phase the plan starts feeling wrong, we stop. The codebase keeps
 the new modules around as orphans and the existing flow keeps working.
