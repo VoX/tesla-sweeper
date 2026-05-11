@@ -1,9 +1,13 @@
-import { parseSlackInput } from '../lib/slack-input.js';
-
 // "Daily Slack Pings" panel. Shows the connected sub when one exists
-// for this (slack_user_id, vehicle_id) pair, otherwise the Slack
-// sign-in flow + manual U-id fallback.
-export function NotificationsPanel({ slackUserId, setSlackUserId, hasSlackSession, enabledForThis, notifLoading, notifError, onSlackSignIn, onEnable, onDisable }) {
+// for this (slack_user_id, vehicle_id) pair, otherwise the "Sign in
+// with Slack" flow. The slack id comes ONLY from that OIDC sign-in —
+// there's no manual-entry field (a free-text input here got autofilled
+// by password managers and poisoned the id).
+export function NotificationsPanel({ slackUserId, hasSlackSession, enabledForThis, notifLoading, notifError, onSlackSignIn, onEnable, onDisable }) {
+  // /enable + /disable need a live Slack-OIDC HMAC session, not just a
+  // remembered slack id.
+  const signedIn = !!slackUserId && hasSlackSession;
+
   return (
     <div className="card" style={{ marginTop: 16 }}>
       <h3>🔔 Daily Slack Pings</h3>
@@ -32,46 +36,24 @@ export function NotificationsPanel({ slackUserId, setSlackUserId, hasSlackSessio
         </>
       ) : (
         <>
-          {slackUserId && hasSlackSession && (
+          {signedIn ? (
             <p style={{ fontSize: '0.85rem', marginBottom: 12 }}>
               🔐 Signed in as <code>{slackUserId}</code>. Click Enable to subscribe, or sign in as someone else.
             </p>
-          )}
-          {slackUserId && !hasSlackSession && (
+          ) : slackUserId ? (
             <p style={{ fontSize: '0.85rem', marginBottom: 12, color: '#d29922' }}>
-              ⚠️ Saved Slack id <code>{slackUserId}</code>, but your Slack session has expired. Click <strong>Sign in with Slack</strong> below to refresh it before enabling.
+              ⚠️ Your Slack session has expired (you were <code>{slackUserId}</code>) — sign in with Slack again to enable.
+            </p>
+          ) : (
+            <p style={{ fontSize: '0.85rem', color: '#8b949e', marginBottom: 12 }}>
+              Sign in with Slack so I know where to send the DMs — no member-id hunting needed.
             </p>
           )}
           <button onClick={onSlackSignIn} disabled={notifLoading} style={{ marginBottom: 12 }}>
-            {notifLoading ? 'Connecting to Slack...' : (slackUserId && hasSlackSession ? 'Switch slack account' : 'Sign in with Slack')}
+            {notifLoading ? 'Connecting to Slack...' : (signedIn ? 'Switch slack account' : 'Sign in with Slack')}
           </button>
-          <details style={{ marginBottom: 12 }} open={!slackUserId ? false : undefined}>
-            <summary style={{ fontSize: '0.8rem', color: '#8b949e', cursor: 'pointer' }}>or paste your slack user id manually</summary>
-            <label htmlFor="slack-user-id" style={{ marginTop: 8, display: 'block' }}>Slack User ID or Profile URL</label>
-            <input
-              id="slack-user-id"
-              name="slack-user-id"
-              type="text"
-              // Keep password managers / browser autofill off this field —
-              // they'll happily inject a saved "test account" value and that
-              // input event would overwrite the real slack id.
-              autoComplete="off"
-              autoCorrect="off"
-              autoCapitalize="off"
-              spellCheck={false}
-              data-1p-ignore="true"
-              data-lpignore="true"
-              data-form-type="other"
-              placeholder="U060NLFUM or paste your slack profile URL"
-              value={slackUserId}
-              onInput={e => setSlackUserId(parseSlackInput(e.target.value))}
-            />
-            <p style={{ fontSize: '0.75rem', color: '#8b949e', marginTop: -8, marginBottom: 12 }}>
-              Find via Slack profile → ⋮ → Copy member ID.
-            </p>
-          </details>
-          <button onClick={onEnable} disabled={notifLoading || !slackUserId}>
-            {notifLoading ? 'Enabling...' : `Enable Daily Notifications${slackUserId ? ` for ${slackUserId}` : ''}`}
+          <button onClick={onEnable} disabled={notifLoading || !signedIn}>
+            {notifLoading ? 'Enabling...' : (signedIn ? `Enable Daily Notifications for ${slackUserId}` : 'Enable Daily Notifications')}
           </button>
         </>
       )}

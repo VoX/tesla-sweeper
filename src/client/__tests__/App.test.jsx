@@ -97,7 +97,7 @@ describe('App', () => {
     expect(opts.some(t => t.includes('Test Vehicle (test)'))).toBe(true);
   });
 
-  it('rejects an invalid Slack user id format before calling /api/notifications/enable', async () => {
+  it('Enable Daily Notifications is disabled (and posts nothing) until you sign in with Slack', async () => {
     routes = {
       'session/me': { authenticated: true, slack_user_id: null, vehicle_id: null, vehicle_name: null },
       '/api/vehicles': { vehicles: [{ id: '111', name: 'Car', vin: 'V', state: 'asleep' }] },
@@ -106,17 +106,15 @@ describe('App', () => {
     const App = await importApp();
     const { container } = render(<App />);
     await tick();
-    const slackInput = container.querySelector('input[placeholder*="U060"], input[type="text"]');
-    expect(slackInput).toBeTruthy();
-    fireEvent.input(slackInput, { target: { value: 'not-a-slack-id' } });
-    const enableBtn = Array.from(container.querySelectorAll('button')).find(b => /enable/i.test(b.textContent));
+    // No manual slack-id field — the id comes only from "Sign in with Slack".
+    expect(container.querySelector('#slack-user-id')).toBeNull();
+    const enableBtn = Array.from(container.querySelectorAll('button')).find(b => /enable daily/i.test(b.textContent));
     expect(enableBtn).toBeTruthy();
+    expect(enableBtn.disabled).toBe(true);
     const callsBefore = globalThis.fetch.mock.calls.length;
     fireEvent.click(enableBtn);
     await tick(10);
-    const enableCalls = globalThis.fetch.mock.calls.slice(callsBefore).filter(
-      ([url]) => String(url).includes('notifications/enable')
-    );
+    const enableCalls = globalThis.fetch.mock.calls.slice(callsBefore).filter(([url]) => String(url).includes('notifications/enable'));
     expect(enableCalls.length).toBe(0);
   });
 });

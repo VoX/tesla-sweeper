@@ -94,7 +94,8 @@ export default function App() {
   const [slackUserId, setSlackUserId] = useState(() => {
     const fromSession = (sessionStorage.getItem('slack_session') || '').split('.')[0];
     if (SLACK_ID_RE.test(fromSession)) return fromSession;
-    return localStorage.getItem('tesla_slack_user_id') || '';
+    const fromLs = localStorage.getItem('tesla_slack_user_id') || '';
+    return SLACK_ID_RE.test(fromLs) ? fromLs : '';
   });
   const [subscriptions, setSubscriptions] = useState(null);
   const [notifLoading, setNotifLoading] = useState(false);
@@ -168,8 +169,8 @@ export default function App() {
 
   const enableNotifications = async () => {
     setNotifError('');
-    if (!/^U[A-Z0-9]+$/.test(slackUserId)) {
-      notifFail('Slack user ID looks like U060NLFUM (Slack profile → ⋮ → Copy member ID)');
+    if (!SLACK_ID_RE.test(slackUserId)) {
+      notifFail('Sign in with Slack first — I need a verified Slack identity to send the DMs to.');
       return;
     }
     const vid = selectedVehicle || vehicles?.[0]?.id;
@@ -568,7 +569,6 @@ export default function App() {
               {vehicles?.length > 0 && (
                 <NotificationsPanel
                   slackUserId={slackUserId}
-                  setSlackUserId={setSlackUserId}
                   hasSlackSession={!!slackSession()}
                   enabledForThis={subscriptions?.find(s => s.vehicle_id === (selectedVehicle || vehicles[0].id))}
                   notifLoading={notifLoading}
