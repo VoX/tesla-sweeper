@@ -3,6 +3,7 @@
 // port, tests use supertest against buildApp().
 
 import express from 'express';
+import cookieParser from 'cookie-parser';
 import { join } from 'path';
 import { REPO_ROOT_PATH as REPO_ROOT } from './config.js';
 
@@ -15,6 +16,9 @@ import { notificationsRouter } from './routes/notifications.js';
 export function buildApp() {
   const app = express();
   app.use(express.json({ limit: '10kb' }));
+  // Populates req.cookies — read by util/session.js (no CSRF middleware:
+  // sweeper.bitvox.me is its own origin, so SameSite=Lax + CORS isolate).
+  app.use(cookieParser());
   app.use(vehiclesRouter);
   app.use(probesRouter);
   app.use(oauthRouter);
