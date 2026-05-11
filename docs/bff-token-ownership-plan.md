@@ -202,27 +202,66 @@ returning, so the rest of the cron loop can crash without losing the rotation.
 
 Stub-vehicle short-circuit unchanged.
 
-### Phase 4 — Add session cookie machinery
+### Phase 4 — Add session cookie machinery + CSRF protection
 
-Add `cookie-parser` middleware in `src/server/app.js`.
+Add `cookie-parser` middleware in `src/server/app.js` (small dep, ~3-line
+change in app.js + one entry in `src/server/package.json`).
 
 New module: `src/server/store/sessions.js` is **not** added — sessions are a
 field on the user record, not a separate store.
 
 Add session helpers in `src/server/util/session.js`:
 ```js
-mintSessionCookieId()   // crypto.randomBytes(32).toString('base64url')
-readSessionCookie(req)  // req.cookies.session
-setSessionCookie(res, id)   // Set-Cookie: session=...; HttpOnly; Secure;
-                            //   SameSite=Lax; Path=/sweeper/; Max-Age=2592000
+mintSessionCookieId()   // sid = crypto.randomBytes(32).toString('base64url')
+                        // emit `${sid}.${signSession(sid)}` reusing the
+                        // existing HMAC primitive in crypto/session.js so a
+                        // forged cookie is rejected before disk I/O.
+readSessionCookie(req)  // verify HMAC, return sid or null
+setSessionCookie(res, signedId)
+//   Set-Cookie: session=<sid>.<hmac>; HttpOnly; Secure;
+//                SameSite=Lax; Path=/sweeper/; Max-Age=2592000
 clearSessionCookie(res)
+mintCsrfCookie(res)
+//   Set-Cookie: csrf=<random32>; Secure; SameSite=Lax; Path=/sweeper/;
+//                Max-Age=2592000
+//   NOT HttpOnly so SPA JS can read it via document.cookie.
+readCsrfCookie(req)  // value from req.cookies.csrf
 ```
 
 `SameSite=Lax` rather than `Strict`: Strict drops the cookie on the OAuth
 return-redirect from `auth.tesla.com`, breaking the callback. Lax preserves
 the cookie on top-level navigations including OAuth redirects, while still
-blocking cross-origin POST attacks. Path is scoped to `/sweeper/` so other
-apps on `claw.bitvox.me` don't see the cookie.
+blocking cross-origin POST attacks. **Path is scoped to `/sweeper/`** so
+sibling apps on `claw.bitvox.me` (cowgame, transcripts, bmo, sprite-review,
+etc.) cannot read the cookie via `document.cookie` (path-scope blocks JS
+read on a different sub-path).
+
+#### CSRF protection (must, not optional)
+
+`claw.bitvox.me` hosts ~10 sub-apps under different paths. Cookies are scoped
+to `Path=/sweeper/`, so other apps' JS can't *read* the session cookie. But
+under same-site rules the browser still *attaches* the cookie when JS on
+those apps makes a `fetch('/sweeper/api/...', { credentials: 'include' })`.
+Stored XSS in any sibling app would let it act as the user.
+
+Mitigation — double-submit CSRF cookie:
+- On `/api/session/create` mint two cookies: `session` (HttpOnly) AND `csrf`
+  (NOT HttpOnly, both Path=/sweeper/).
+- New middleware `requireCsrf` in `src/server/middleware/csrf.js` runs on
+  every state-changing route under `/api/`. Checks `X-CSRF-Token` header
+  matches `req.cookies.csrf` via `crypto.timingSafeEqual`. 403 on mismatch.
+- SPA reads the csrf cookie via `document.cookie`, includes
+  `X-CSRF-Token: <value>` on every POST/DELETE.
+
+Sibling apps cannot read the csrf cookie (path scope blocks JS access from a
+different sub-path), so they can't synthesize the matching header.
+
+GETs are exempted (the only sensitive GET is `/api/notifications/status` and
+`/api/session/me`, which leak slack id + vehicle name only — acceptable
+read surface).
+
+The `/api/notifications/run` bearer-token endpoint and `/api/oauth/app/start`
+are exempted from CSRF (they don't use the session cookie).
 
 ### Phase 5 — New auth endpoints
 
@@ -234,10 +273,18 @@ POST /api/session/create
   response: 200, body: { vehicles: [...] }  # SPA needs the list anyway
 
 POST /api/session/destroy
-  cookie: session=<id>
+  cookie: session=<id>; csrf=<token> + X-CSRF-Token header
   effect: clear session_cookie_id on the user record (sub fields preserved
-          if present), clear cookie
+          if present); best-effort POST to Tesla's revoke endpoint
+          (https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/revoke) so a
+          stolen-laptop wipe actually kills the credential server-side too;
+          clear both cookies
   response: 204
+  Note: revocation is best-effort — log + swallow any failure. The
+  subscription's refresh_token is intentionally NOT revoked (one record /
+  one token under shared model means revoking would also kill the cron).
+  If both session AND sub are being torn down (full account deletion, future
+  feature), revoke at that point.
 
 GET /api/session/me
   cookie: session=<id>
@@ -281,12 +328,28 @@ later enables for vehicle B, the second call overwrites the first. **One
 sub per user**, deliberately. Multi-vehicle support is a separate feature and
 out of scope (see Out of scope).
 
-**Backwards compat for one release**: each tesla-touching route accepts EITHER
-a session cookie OR a `token` body field. Cookie wins. This lets the SPA
-migrate independently of the server.
+**Backwards compat for one release** — applies to BOTH the body shape AND the
+auth source. Each tesla-touching route in this phase accepts EITHER:
+
+- Cookie path: session cookie + `X-CSRF-Token` header. Body has no
+  `refresh_token`/`token` field.
+- Legacy body path: `{ token, refresh_token, ...other-fields }` exactly as
+  today. No CSRF check (legacy SPAs don't have the csrf cookie).
+
+`/api/notifications/enable` specifically: under cookie-path the body is
+`{ vehicle_id, vehicle_name, slack_user_id, slack_session }` (no
+refresh_token — server pulls from user record). Under legacy body-path the
+body is `{ refresh_token, vehicle_id, vehicle_name, slack_user_id, session }`
+exactly as today, and on success the server creates a new user record from
+the supplied refresh_token. Cookie wins if both present.
+
+**Deploy gate**: Phase 7 (SPA migration) is hard-blocked on Phase 6 being
+LIVE in prod, not just merged. If Phase 7 ships before Phase 6 is in prod,
+every logged-in user gets 400s on `/api/vehicles` and `/api/check`. The PR
+description for Phase 7 must include "verified Phase 6 server is deployed."
 
 After SPA migration ships and a couple of weeks pass with no fallback hits in
-logs, remove the `token` body acceptance.
+logs, remove the legacy body path AND the no-csrf compat path.
 
 ### Phase 7 — SPA migration
 
@@ -299,20 +362,43 @@ In `src/client/`:
   effect (`App.jsx:228-249`). Both become server concerns.
 - OAuth callback handler (`App.jsx:423`): instead of POSTing `{code}` to
   `/api/oauth/app/callback`, POST `{code, state}` to `/api/session/create`.
-  Response sets the session cookie via Set-Cookie header. SPA records
+  Response sets session + csrf cookies via Set-Cookie. SPA records
   "logged in" state from the response body (vehicles list).
-- Add `/api/session/me` call on mount to detect existing session.
-- All existing API calls drop the `token` body field. They include the
-  cookie automatically (same-origin).
-- Add `credentials: 'include'` to every `fetch` call in `lib/api.js` so the
-  cookie rides along (required for fetch even on same-origin in some browser
-  configurations).
+- Add `/api/session/me` call on mount to detect existing session. Response
+  shape includes `subscribed: { vehicle_name, enabled_at } | null` so the
+  SPA can show "your sub for `<name>` is still active" without prompting
+  re-enable.
+- All existing API calls drop the `token` body field. `lib/api.js` is
+  modified centrally (the two helpers `post` and `get`, NOT per call site)
+  to add `credentials: 'include'` and pull `X-CSRF-Token` from the csrf
+  cookie via `document.cookie`. Two-line change in api.js, no per-call
+  changes.
 - Logout button calls `/api/session/destroy`, then SPA clears its in-memory
-  state.
-- 401 handling: on any 401 with `{ session_expired: true }`, redirect to OAuth start.
+  state. Logout confirmation surfaces "your noon notifications are still
+  active — go to the Notifications panel to disable separately if you want
+  them off." (Sub-state survives logout under the shared-record model.)
+- 401 handling: server returns `{ session_expired: true }` for any of
+  {cookie absent, cookie HMAC invalid, refresh revoked}. SPA collapses all
+  three into the same UX (re-OAuth). 403 on csrf mismatch is logged + the
+  user sees a generic "session expired" with the same re-OAuth path.
+- OAuth state TTL UX: server returns `400 { detail: 'state expired' }` when
+  the user takes >10 min between `/start` and `/session/create`. SPA shows
+  "session setup expired, log in again" and routes back to OAuth start.
+  Don't bury this in a generic error.
+- Mid-flight logout: the SPA fires the destroy call but lets any in-flight
+  `/api/check` resolve naturally (its access_token is already valid for the
+  remainder of its own request); the destroy clears the cookies for next
+  navigation. Server-side `getTeslaAccess` on a destroyed session returns
+  401 — caller already has an in-progress request, so this only matters for
+  the next request after logout.
 
 The `tokens` state object goes away. The `transientToast` + `oauthStatus`
 split stays. The Slack session HMAC flow is unchanged (orthogonal to tesla).
+
+**Test impact**: `src/client/__tests__/App.test.jsx` lines 47, 61, 87 all
+seed `localStorage.setItem('tesla_tokens', ...)` to drive rendered state.
+Phase 7 deletes that codepath — these 3 tests need rewrites to seed a
+`/api/session/me` mocked response instead. Add the rewrite to phase 7's PR.
 
 ### Phase 8 — Remove the backwards-compat `token` body acceptance
 
@@ -334,12 +420,14 @@ Delete the `.subscriptions.json.pre-bff` safety-net file from disk.
 | `src/server/routes/notifications.js` | drop refresh_token from /enable body, write to user record | ~30 changes |
 | `src/server/routes/oauth.js` | delete `/api/oauth/app/refresh`; keep start, redirect callback to /session/create | -25 |
 | `src/server/notifications/cron.js` | replace inline exchange with `getTeslaAccess` | ~15 changes |
-| `src/client/App.jsx` | drop tokens state + refreshToken + polling effect; switch endpoints; cookie-aware fetch | -80 / +20 |
-| `src/client/lib/api.js` | add `credentials: 'include'` | +1 line per call |
-| Tests (users + tesla-auth + session routes + retry classifier) | NEW | ~200 |
-| `package.json` | add `cookie-parser` dep | +1 |
+| `src/client/App.jsx` | drop tokens state + refreshToken + 60s polling effect + tokens-loaded effect + 401-retry blocks + OAuth callback rewire + me-bootstrap | ~150 touched, net -100 |
+| `src/client/lib/api.js` | edit `post` + `get` helpers (NOT per call): `credentials: 'include'` + `X-CSRF-Token` header pull from `document.cookie` | +6 |
+| `src/client/__tests__/App.test.jsx` | rewrite 3 tests that seed `localStorage.tesla_tokens` to seed `/api/session/me` mock instead | ~30 changes |
+| `src/server/middleware/csrf.js` | NEW double-submit verifier | ~25 |
+| Tests (users + tesla-auth + session routes + csrf middleware + retry classifier) | NEW | ~250 |
+| `src/server/package.json` | add `cookie-parser` dep | +1 |
 
-Net: roughly +400 / -130 lines. ~6-8 hours of focused work spread across
+Net: roughly +500 / -200 lines. ~8-10 hours of focused work spread across
 phases 1-8.
 
 ## Test plan
@@ -361,9 +449,36 @@ Update existing:
 
 - `routes.test.js` `/api/vehicles` and `/api/check` switch to cookie-based
   auth in primary tests; keep one `token`-body assertion until phase 8 to
-  cover the compat path.
+  cover the compat path. Add CSRF-header assertion (`X-CSRF-Token` required
+  on POSTs).
 - `notifications-cron.test.js` swap `teslaTokenExchange` mocks for
   `getTeslaAccess` mocks.
+- `client/__tests__/App.test.jsx` rewrite the 3 `localStorage.tesla_tokens`
+  seeded tests to mock `/api/session/me` responses instead.
+
+## Audit logging
+
+Add minimal session-lifecycle log lines (matches the existing `[oauth/app]`
+style in `routes/oauth.js`):
+- `[session] created sid=<first8> slack=<U... or none>` on `/session/create`
+- `[session] destroyed sid=<first8>` on `/session/destroy`
+- `[session] refresh_failed sid=<first8> reason=<invalid_grant|transient|config>` from `getTeslaAccess`
+- `[session] invalidated sid=<first8>` when `refresh_invalidated_at` is set
+- `[session] pruned <N> orphaned` from the daily prune
+
+Single-line, no PII beyond the (truncated) sid. Helps post-incident triage
+without standing up a real audit log pipeline.
+
+## Disable-after-tesla-session-expired guarantee
+
+Explicit invariant: `/api/notifications/disable` is HMAC-gated by the slack
+session ONLY. It does NOT require a valid Tesla session cookie. Recovery
+path for a user whose tesla cookie expired but who wants to stop the DMs:
+- They re-do Slack OIDC sign-in (mints fresh slack HMAC, ~30 min validity).
+- They POST `/api/notifications/disable { id, slack_user_id, session }` —
+  server clears the slack/vehicle fields on the matching user record.
+- No tesla OAuth required for cleanup. This must remain true through every
+  phase of the migration.
 
 ## Risks + rollback
 
@@ -393,6 +508,40 @@ by phase 2's retry classification — only `invalid_grant` invalidates; 5xx
 retries 3× then leaves the record intact for the next attempt. Without this
 fix, a 502 wave would nuke every record.
 
+**Risk: Cross-app CSRF via sibling apps on `claw.bitvox.me`.** Same-site
+cookie semantics mean a sibling app's stored XSS could fetch our endpoints
+with the session cookie attached. Mitigated by the double-submit CSRF
+pattern (csrf cookie scoped to `/sweeper/`, sibling JS can't read it,
+sibling-issued requests can't synthesize the matching `X-CSRF-Token`
+header). Mandatory; not optional.
+
+**Risk: Stolen-laptop logout doesn't fully kill the Tesla credential.**
+Mitigated by the best-effort revoke call in `/session/destroy`. Failure
+swallowed — the local cookie + record clear is the primary defense; the
+revoke is belt-and-suspenders.
+
+**Risk: NA vs EU Tesla Fleet endpoints.** `tesla.js:5-6` hardcodes
+`na.vn.cloud.tesla.com`. Token endpoint is region-agnostic; data endpoint
+is not. Non-issue today (single-user, NA), worth a comment in the new
+helper module so a future EU user doesn't surprise us.
+
+**Risk: In-flight refreshes across server restart.** Single-flight is
+in-process. A restart drops every in-flight promise; sessions/subs survive
+on disk. In-flight requests get 502; SPA retries. No data corruption
+because writes are atomic.
+
+**Risk: Daily prune races a just-active session.** Prune snapshot reads
+sessions, drops anything `last_seen_at > 30d`. If a request bumps
+`last_seen_at` mid-prune, the prune's stale snapshot wins and the session
+gets dropped. Mitigation: re-read inside the write lock or accept one-day
+false drops (user re-OAuths). Acceptable at our scale.
+
+**Risk: Logout / cookie loss leaves the cron silently DM-ing.** By design
+(shared model: logout is browser-cookie-only; subscription survives). UX
+mitigation: logout button surfaces "notifications still active, disable
+separately"; `/session/me` response includes existing-sub info on next
+login so the SPA can show "noticed your sub for X is still active".
+
 **Risk: Tesla grant expiry at 90 days regardless of rotation.** A user
 record's refresh_token can age out even with daily rotation. After expiry,
 all refresh attempts return `invalid_grant` and the record gets the
@@ -416,6 +565,18 @@ where `session_cookie_id` is null AND slack/vehicle fields are empty AND
 - Phase 6 (backwards-compat routes): existing SPAs keep working via body token.
 - Phase 7 (SPA migration): if it goes wrong, revert the one frontend commit and rebuild.
 - Phase 8 (remove compat): if removed too eagerly, restore from git.
+
+## Multi-device under shared model
+
+A user with two browsers gets two sessions, each with its own cookie. Both
+cookies map to the SAME user record (find-or-create by tesla account id).
+All `getTeslaAccess(userId)` calls go through one in-process single-flight
+per user-id, so two devices refreshing in the same second collapse to one
+Tesla round-trip. Logout on phone clears phone's cookie; desktop keeps
+working off the same user record. Cron + interactive coexistence: also
+single-flighted via the same per-userId Map. No collision possible because
+there's only ever one `refresh_token` rotation in flight per user at any
+given moment.
 
 ## Out of scope
 
