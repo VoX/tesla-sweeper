@@ -16,6 +16,16 @@ export function NotificationsPanel({ slackUserId, setSlackUserId, hasSlackSessio
             ✅ Enabled for <strong>{enabledForThis.vehicle_name}</strong> — DMs go to <code>{enabledForThis.slack_user_id}</code>
             {enabledForThis.last_check_at && <> · last check {new Date(enabledForThis.last_check_at).toLocaleString()}</>}
           </p>
+          {!hasSlackSession && (
+            <>
+              <p style={{ fontSize: '0.85rem', marginBottom: 12, color: '#d29922' }}>
+                ⚠️ Your Slack session has expired — sign in with Slack again to disable.
+              </p>
+              <button onClick={onSlackSignIn} disabled={notifLoading} style={{ marginBottom: 12 }}>
+                {notifLoading ? 'Connecting to Slack...' : 'Sign in with Slack'}
+              </button>
+            </>
+          )}
           <button className="disconnect-btn" onClick={() => onDisable(enabledForThis.id)} disabled={notifLoading}>
             {notifLoading ? 'Disabling...' : 'Disable Notifications'}
           </button>

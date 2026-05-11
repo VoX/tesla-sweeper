@@ -197,6 +197,13 @@ export default function App() {
   };
 
   const disableNotifications = async (subId) => {
+    // Disabling is also HMAC-gated — needs a live Slack session, same as
+    // enabling. (Recovery path: re-do "Sign in with Slack", then Disable.
+    // No Tesla session/cookie required for this.)
+    if (!slackSession()) {
+      notifFail('Your Slack session expired — click "Sign in with Slack" above, then Disable.');
+      return;
+    }
     setNotifLoading(true);
     setNotifError('');
     try {
