@@ -32,17 +32,35 @@ const SLACK_USER_ID_RE = /^U[A-Z0-9]+$/;
 
 export const notificationsRouter = Router();
 
-// One subscription per slack_user_id. Clears the slack/vehicle fields on
-// every record for `slackUserId` except `keepId`; a record that ends up
-// with neither a sub nor a session-cookie binding is deleted outright.
-// (Handles e.g. a pre-BFF migrated record that /session/create couldn't
-// match by tesla_account_id, leaving a stale duplicate sub behind.)
+// A subscription's fields, cleared. Telemetry (failure streak, DM-dedup
+// dates, stuck-DM cooldown) is zeroed too — so re-`/enable`ing a record
+// later doesn't inherit a stale `last_dm_date` (would suppress the first
+// real DM) or an old failure streak.
+const CLEARED_SUB = {
+  slack_user_id: null, vehicle_id: null, vehicle_name: null,
+  consecutive_failures: 0, last_dm_date: null, last_digest_date: null, last_dm_error_at: null,
+};
+// The fresh-sub telemetry reset, applied alongside the new slack/vehicle
+// fields when re-using an existing record (e.g. the cookie-bound one).
+const FRESH_SUB_TELEMETRY = {
+  consecutive_failures: 0, last_dm_date: null, last_digest_date: null, last_dm_error_at: null,
+};
+
+// One subscription per slack_user_id. Clears the sub on every record for
+// `slackUserId` except `keepId`; a record that ends up with neither a sub
+// nor a session-cookie binding is deleted outright. (Handles e.g. a
+// pre-BFF migrated record that /session/create couldn't match by
+// tesla_account_id, leaving a stale duplicate sub behind.)
 function clearOtherSubs(slackUserId, keepId) {
   for (const u of loadUsers()) {
     if (u.id === keepId || u.slack_user_id !== slackUserId) continue;
-    if (u.session_cookie_id) patchUser(u.id, { slack_user_id: null, vehicle_id: null, vehicle_name: null });
-    else deleteUser(u.id);
-    console.log(`[notifications] removed duplicate sub on record ${u.id.slice(0, 8)} for ${slackUserId}`);
+    if (u.session_cookie_id) {
+      patchUser(u.id, CLEARED_SUB);
+      console.log(`[notifications] cleared duplicate sub on record ${u.id.slice(0, 8)} for ${slackUserId} (record kept — browser still bound)`);
+    } else {
+      deleteUser(u.id);
+      console.log(`[notifications] deleted empty duplicate record ${u.id.slice(0, 8)} for ${slackUserId}`);
+    }
   }
 }
 
@@ -70,7 +88,7 @@ notificationsRouter.post('/api/notifications/enable', wrap(async (req, res) => {
     if (!isStub && (!cookieUser.refresh_token || cookieUser.refresh_invalidated_at)) {
       return res.status(409).json({ detail: 'Tesla authorization missing or expired — re-authorize first.' });
     }
-    const patch = { slack_user_id, vehicle_id: vid, vehicle_name: vname };
+    const patch = { slack_user_id, vehicle_id: vid, vehicle_name: vname, ...FRESH_SUB_TELEMETRY };
     // Stub vehicle → force the sentinel so the cron short-circuits
     // (it branches on refresh_token === STUB_REFRESH_TOKEN before any
     // Tesla call). Real vehicle → the record's refresh_token is kept.
@@ -116,7 +134,7 @@ notificationsRouter.post('/api/notifications/disable', wrap(async (req, res) => 
   // bound to it (logged-in-but-unsubscribed); otherwise it's empty —
   // delete it. No Tesla session cookie required: a user whose Tesla
   // auth lapsed must still be able to stop the DMs.
-  if (user.session_cookie_id) patchUser(id, { slack_user_id: null, vehicle_id: null, vehicle_name: null });
+  if (user.session_cookie_id) patchUser(id, CLEARED_SUB);
   else deleteUser(id);
   console.log(`[notifications] disabled slack=${slack_user_id} record=${id.slice(0, 8)}`);
   res.json({ disabled: true });

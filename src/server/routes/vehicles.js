@@ -52,12 +52,8 @@ vehiclesRouter.post('/api/vehicles', wrap(async (req, res) => {
   if (!accessToken) return;
   console.log('[vehicles] Fetching vehicle list');
   let vehicles;
-  try { vehicles = await listVehicles(accessToken); }
-  catch (e) {
-    if (e.status === 401) return res.status(401).json({ detail: 'Invalid or expired Tesla token' });
-    console.error('[vehicles] Tesla API error:', e.status, e.message);
-    return res.status(e.status || 502).json({ detail: e.message });
-  }
+  try { vehicles = await listVehicles(accessToken); } // listVehicles logs its own non-401 Tesla errors
+  catch (e) { return res.status(e.status || 502).json({ detail: e.message }); }
   console.log(`[vehicles] Found ${vehicles.length} vehicle(s)`);
   res.json({ vehicles });
 }));
@@ -84,7 +80,7 @@ vehiclesRouter.post('/api/check', wrap(async (req, res) => {
   if (!vid) {
     let list;
     try { list = await listVehicles(accessToken); }
-    catch (e) { return res.status(e.status === 401 ? 401 : (e.status || 502)).json({ detail: e.message }); }
+    catch (e) { return res.status(e.status || 502).json({ detail: e.message }); }
     if (!list.length) return res.json({ no_vehicles: true });
     vid = list[0].id;
   }
