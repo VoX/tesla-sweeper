@@ -159,33 +159,15 @@ describe('unknown /api/* paths', () => {
   });
 });
 
-describe('POST /api/oauth/app/start + /callback — server-side state', () => {
-  it('mints + consumes a state in one round trip', async () => {
-    const start = await request(app).post('/api/oauth/app/start').send({});
-    expect(start.status).toBe(200);
-    expect(start.body.state).toBeTruthy();
-    // Tesla token exchange is mocked; we just need the state gate to pass.
-    const cb = await request(app).post('/api/oauth/app/callback').send({ code: 'c', state: start.body.state });
-    expect(cb.status).toBe(200);
-    expect(cb.body).toHaveProperty('access_token');
-  });
-
-  it('rejects /callback without state', async () => {
-    const r = await request(app).post('/api/oauth/app/callback').send({ code: 'c' });
-    expect(r.status).toBe(400);
-  });
-
-  it('rejects /callback with a forged state', async () => {
-    const r = await request(app).post('/api/oauth/app/callback').send({ code: 'c', state: 'never-minted' });
-    expect(r.status).toBe(400);
-  });
-
-  it('rejects /callback when reusing a consumed state (one-shot)', async () => {
-    const start = await request(app).post('/api/oauth/app/start').send({});
-    const first = await request(app).post('/api/oauth/app/callback').send({ code: 'c', state: start.body.state });
-    expect(first.status).toBe(200);
-    const replay = await request(app).post('/api/oauth/app/callback').send({ code: 'c', state: start.body.state });
-    expect(replay.status).toBe(400);
+describe('POST /api/oauth/app/start + the shared state registry', () => {
+  // The Tesla code exchange + state-consumption live in /api/session/create
+  // now (covered by session-routes.test.js). Here we just check /start
+  // mints a state and that states are type-tagged across the two flows.
+  it('mints a state', async () => {
+    const r = await request(app).post('/api/oauth/app/start').send({});
+    expect(r.status).toBe(200);
+    expect(r.body.state).toBeTruthy();
+    expect(r.body.url).toContain('auth.tesla.com');
   });
 
   it('rejects a tesla state used on the slack callback (type-tagged)', async () => {

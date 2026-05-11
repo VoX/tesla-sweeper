@@ -36,11 +36,12 @@ export default function App() {
   const [vehicles, setVehicles] = useState(null);
   const [selectedVehicle, setSelectedVehicle] = useState(() => localStorage.getItem('tesla_selected_vehicle') || null);
   const [mapPos, setMapPos] = useState(null);
+  // Transient status during the OAuth flow ("Redirecting…", "Exchanging
+  // code…", "Connected — N vehicles found"). The server now owns token
+  // lifetime, so there's no "token expires in Xh" steady-state ticker.
   const [oauthStatus, setOauthStatus] = useState('');
-  // Transient toast layered over oauthStatus so the 60s tick effect
-  // can keep refreshing the steady-state connection string without
-  // wiping action toasts ("token refreshed", "slack pings enabled").
-  // Auto-clears after 5s.
+  // Transient toast layered over oauthStatus for action feedback
+  // ("slack pings enabled", "signed out"). Auto-clears after 5s.
   const [transientToast, setTransientToast] = useState('');
   const toastTimerRef = useRef(null);
   const showToast = useCallback((msg) => {
@@ -48,12 +49,14 @@ export default function App() {
     setTransientToast(msg);
     toastTimerRef.current = setTimeout(() => setTransientToast(''), 5000);
   }, []);
-  const [tokens, setTokens] = useState(() => {
-    try {
-      const saved = localStorage.getItem('tesla_tokens');
-      return saved ? JSON.parse(saved) : null;
-    } catch { return null; }
-  });
+  // BFF session state: the server holds the Tesla refresh_token; the
+  // browser only carries a signed HttpOnly `session` cookie (invisible
+  // to JS). `loggedIn` is resolved by GET /api/session/me on mount, or
+  // set true after POST /api/session/create completes an OAuth return.
+  // `authChecked` gates the first render so we don't flash the "Connect"
+  // screen at a returning, already-signed-in user before /me answers.
+  const [loggedIn, setLoggedIn] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
 
   // Manual tab state — drag-to-set location, sweep + side detection
   // re-fetched on each pin move. Default centered on Somerville.
@@ -88,8 +91,6 @@ export default function App() {
   const [notifLoading, setNotifLoading] = useState(false);
   const [notifError, setNotifError] = useState('');
 
-  const refreshPromise = useRef(null);
-
   const autoCheckedRef = useRef(false);
 
   // Geo response → "{house_number} {street}" with empty parts dropped.
@@ -101,39 +102,6 @@ export default function App() {
   const slackSession = () => sessionStorage.getItem('slack_session') || '';
 
   useEffect(() => {
-    if (tokens) {
-      localStorage.setItem('tesla_tokens', JSON.stringify(tokens));
-      if (!vehicles) {
-        fetchVehicles(tokens.access_token).then(vlist => {
-          const vid = selectedVehicle || (vlist.length === 1 ? vlist[0].id : null);
-          if (vid && !autoCheckedRef.current) {
-            autoCheckedRef.current = true;
-            // Hydrate from 6h cache if available — avoids waking the
-            // car on every page open within the window.
-            const cached = readCachedCheck(vid);
-            if (cached) {
-              setMapPos(cached.mapPos);
-              setVehicleInfo(cached.vehicleInfo);
-              setSweepData(cached.sweepData);
-              return;
-            }
-            // No cache: only auto-check if the car is already online.
-            // Avoids silently waking it on passive page loads. Manual
-            // "Check My Car" still forces a wake-then-check.
-            const v = vlist.find(x => x.id === vid);
-            if (v?.state === 'online') {
-              checkVehicle(tokens.access_token, vid).catch(() => {});
-            }
-          }
-        }).catch(() => {});
-      }
-    } else {
-      localStorage.removeItem('tesla_tokens');
-      clearCachedCheck();
-    }
-  }, [tokens]);
-
-  useEffect(() => {
     if (selectedVehicle) localStorage.setItem('tesla_selected_vehicle', selectedVehicle);
     else localStorage.removeItem('tesla_selected_vehicle');
   }, [selectedVehicle]);
@@ -143,23 +111,35 @@ export default function App() {
   }, [slackUserId]);
 
   useEffect(() => {
-    if (tokens && slackUserId) fetchSubscriptions(slackUserId);
-    // Key on the stable refresh_token string instead of the tokens
-    // object — token refresh creates a new object every ~7h and we
-    // don't need to re-fetch subs on each silent rotation.
-  }, [tokens?.refresh_token, slackUserId]);
+    if (loggedIn && slackUserId) fetchSubscriptions(slackUserId);
+  }, [loggedIn, slackUserId]);
 
-  const logout = () => {
-    setTokens(null);
+  // Any 401 from a tesla-touching call means the BFF session is gone or
+  // the refresh_token was revoked — there's nothing the SPA can do but
+  // send the user back through Tesla OAuth. Drop to the Connect screen.
+  const handleAuthExpired = useCallback(() => {
+    setLoggedIn(false);
     setVehicles(null);
     setSelectedVehicle(null);
-    setOauthStatus('');
     setSubscriptions(null);
-    // Clear cached check directly — the localStorage useEffect only
-    // runs when the value differs, and a stale `tesla_last_check`
-    // would otherwise survive a logout/login cycle.
+    autoCheckedRef.current = false;
     clearCachedCheck();
     reset();
+    setOauthStatus('⚠️ Session expired — sign in with Tesla again.');
+  }, []);
+
+  const logout = async () => {
+    try { await post('session/destroy', {}); } catch { /* best-effort; cookie clears regardless */ }
+    setLoggedIn(false);
+    setVehicles(null);
+    setSelectedVehicle(null);
+    setSubscriptions(null);
+    autoCheckedRef.current = false;
+    clearCachedCheck();
+    reset();
+    setOauthStatus('');
+    // Sub-state survives logout under the shared-record model — say so.
+    showToast('Signed out. Your noon notifications are still active — use the Notifications panel to turn them off.');
   };
 
   const fetchSubscriptions = async (uid) => {
@@ -176,16 +156,17 @@ export default function App() {
       return;
     }
     const vid = selectedVehicle || vehicles?.[0]?.id;
-    if (!vid || !tokens?.refresh_token) { setNotifError('Need a connected vehicle first'); return; }
+    if (!vid) { setNotifError('Need a connected vehicle first'); return; }
     setNotifLoading(true);
     try {
       const veh = vehicles.find(v => v.id === vid);
+      // No refresh_token in the body — the server pulls it from the
+      // cookie-bound record. slack_session is the confused-deputy gate.
       const data = await post('notifications/enable', {
-        refresh_token: tokens.refresh_token,
         vehicle_id: vid,
         vehicle_name: veh?.name || 'Unknown',
         slack_user_id: slackUserId,
-        session: slackSession(),
+        slack_session: slackSession(),
       });
       await fetchSubscriptions(slackUserId);
       setNotifError('');
@@ -206,7 +187,7 @@ export default function App() {
     setNotifLoading(true);
     setNotifError('');
     try {
-      await post('notifications/disable', { id: subId, slack_user_id: slackUserId, session: slackSession() });
+      await post('notifications/disable', { id: subId, slack_user_id: slackUserId, slack_session: slackSession() });
       await fetchSubscriptions(slackUserId);
     } catch (e) {
       setNotifError(e.message);
@@ -222,98 +203,41 @@ export default function App() {
     setMapPos(null);
   };
 
-  const refreshToken = useCallback(async () => {
-    if (!tokens?.refresh_token) return false;
-    if (refreshPromise.current) return refreshPromise.current;
-    refreshPromise.current = (async () => {
-      try {
-        const data = await post('oauth/app/refresh', { refresh_token: tokens.refresh_token });
-        const newTokens = {
-          access_token: data.access_token,
-          refresh_token: data.refresh_token || tokens.refresh_token,
-          expires_at: Date.now() + data.expires_in * 1000,
-        };
-        setTokens(newTokens);
-        showToast('\u2705 Token refreshed');
-        return data.access_token;
-      } catch (e) {
-        showToast('\u274C Refresh failed: ' + e.message);
-        setTokens(null);
-        return false;
-      } finally {
-        refreshPromise.current = null;
-      }
-    })();
-    return refreshPromise.current;
-  }, [tokens]);
-
-  useEffect(() => {
-    if (!tokens) return;
-    const check = () => {
-      const remaining = Math.max(0, tokens.expires_at - Date.now());
-      const mins = Math.floor(remaining / 60000);
-      const hrs = Math.floor(mins / 60);
-      if (remaining <= 0) {
-        setOauthStatus('\u26A0\uFE0F Token expired. Refreshing...');
-        refreshToken();
-      } else if (hrs > 0) {
-        setOauthStatus(`\u2705 Connected — token expires in ${hrs}h ${mins % 60}m`);
-      } else {
-        setOauthStatus(`\u2705 Connected — token expires in ${mins}m`);
-      }
-    };
-    // Eager run so an already-expired token on mount kicks off a
-    // refresh immediately instead of waiting up to 60s for the first
-    // setInterval tick.
-    check();
-    const interval = setInterval(check, 60000);
-    return () => clearInterval(interval);
-  }, [tokens, refreshToken]);
-
-  const fetchVehicles = async (accessToken) => {
+  // POST /api/vehicles — body is empty; the server resolves a Tesla
+  // access_token from the session cookie. A 401 means the session/auth
+  // is gone → kick back to OAuth.
+  const fetchVehicles = async () => {
     let data;
     try {
-      data = await post('vehicles', { token: accessToken });
+      data = await post('vehicles', {});
     } catch (e) {
-      // Match checkVehicle's pattern: a 401 on a stale-load means the
-      // token expired since last visit; refresh + retry once before
-      // bubbling up. Without this, the page sat on a failed /vehicles
-      // until the 60s setInterval polling tick eventually triggered
-      // the refresh on its own.
-      if (e.status === 401 && tokens?.refresh_token) {
-        const newToken = await refreshToken();
-        if (newToken) data = await post('vehicles', { token: newToken });
-        else throw e;
-      } else throw e;
+      if (e.status === 401) { handleAuthExpired(); return []; }
+      throw e;
     }
     setVehicles(data.vehicles);
     if (data.vehicles.length === 1) setSelectedVehicle(data.vehicles[0].id);
     // Drop a stale selectedVehicle if the new list doesn't contain it —
-    // happens after switching Tesla accounts. Otherwise the next
-    // /api/check would 404/401 with the old id from another account.
+    // happens after switching Tesla accounts.
     else if (selectedVehicle && !data.vehicles.some(v => v.id === selectedVehicle)) {
       setSelectedVehicle(null);
     }
     return data.vehicles;
   };
 
-  const checkVehicle = async (accessToken, vehicleId) => {
+  const checkVehicle = async (vehicleId) => {
     let vehicle;
-    const body = { token: accessToken };
+    const body = {};
     if (vehicleId) body.vehicle_id = vehicleId;
     try {
       vehicle = await post('check', body);
     } catch (e) {
-      if (e.status === 401 && tokens?.refresh_token) {
-        const newToken = await refreshToken();
-        if (newToken) vehicle = await post('check', { ...body, token: newToken });
-        else throw e;
-      } else throw e;
+      if (e.status === 401) { handleAuthExpired(); return; }
+      throw e;
     }
 
     if (vehicle.no_vehicles) {
       setVehicles([]);
-      setOauthStatus('\u2705 Connected — no vehicles on this account');
+      setOauthStatus('✅ Connected — no vehicles on this account');
       return;
     }
 
@@ -340,11 +264,46 @@ export default function App() {
     }
   };
 
+  // Gentle post-login auto-check (returning user / page reload): hydrate
+  // from the 6h cache if present, else only check if the car is already
+  // online — never silently wake it on a passive page load. The "Check
+  // My Car" button still force-wakes.
+  const autoCheckOnLoad = useCallback((vlist) => {
+    if (autoCheckedRef.current) return;
+    const vid = selectedVehicle || (vlist.length === 1 ? vlist[0].id : null);
+    if (!vid) return;
+    autoCheckedRef.current = true;
+    const cached = readCachedCheck(vid);
+    if (cached) {
+      setMapPos(cached.mapPos);
+      setVehicleInfo(cached.vehicleInfo);
+      setSweepData(cached.sweepData);
+      return;
+    }
+    const v = vlist.find(x => x.id === vid);
+    if (v?.state === 'online') checkVehicle(vid).catch(() => {});
+  }, [selectedVehicle]);
+
+  // Mount: GET /api/session/me. If authenticated, adopt the session,
+  // pull the slack_user_id (if the server has one on the record), fetch
+  // the vehicle list, and run the gentle auto-check. Skipped when we're
+  // returning from an OAuth redirect (handled by the ?code= effect).
+  const checkSession = useCallback(async () => {
+    let me;
+    try { me = await get('session/me'); } catch { me = { authenticated: false }; }
+    if (me.authenticated) {
+      setLoggedIn(true);
+      if (me.slack_user_id) setSlackUserId(me.slack_user_id);
+      const vlist = await fetchVehicles();
+      autoCheckOnLoad(vlist);
+    }
+    setAuthChecked(true);
+  }, [autoCheckOnLoad]);
+
   // 300ms trailing debounce so a flurry of drag-releases (drag, drop,
   // re-drag) collapses into one server round-trip. AbortController
   // already cancels in-flight requests; this just stops us from
-  // queueing them in the first place. Auto-probe on tab switch
-  // (line below the useCallback) bypasses the debounce on purpose.
+  // queueing them in the first place.
   const pinDebounceRef = useRef(null);
   const debouncedPinMove = useCallback((lat, lng) => {
     clearTimeout(pinDebounceRef.current);
@@ -387,7 +346,7 @@ export default function App() {
   }, [tab]);
 
   const handleCheckCar = async (vid) => {
-    if (!tokens?.access_token) return;
+    if (!loggedIn) return;
     if (loading) return;
     reset();
     setLoading(true);
@@ -395,7 +354,7 @@ export default function App() {
     // its wake-and-poll loop. Switch the UI to "Waking..." so the user
     // knows the next ~30-50s of latency is expected, not a hang.
     const wakeHint = setTimeout(() => setWaking(true), 7000);
-    try { await checkVehicle(tokens.access_token, vid || selectedVehicle); }
+    try { await checkVehicle(vid || selectedVehicle); }
     catch (e) { setError(e.message); }
     finally {
       clearTimeout(wakeHint);
@@ -431,11 +390,14 @@ export default function App() {
     }
   };
 
+  // Mount: dispatch on whether we're returning from an OAuth redirect.
+  // With ?code= → finish the Slack or Tesla exchange. Without → ask the
+  // server if we already have a session (GET /api/session/me).
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const code = params.get('code');
     const state = params.get('state');
-    if (!code) return;
+    if (!code) { checkSession(); return; }
 
     // Strip just the OAuth params (code/state); preserve ?tab=.
     const cleaned = new URL(window.location);
@@ -456,8 +418,7 @@ export default function App() {
           setSlackUserId(data.slack_user_id);
           // Stash the HMAC session token paired with the slack id so
           // /enable + /disable can prove the requester owns it.
-          // 30-min TTL — the user has to re-sign-in if they sit on
-          // the page longer than that before subscribing.
+          // 30-min TTL — re-sign-in if you sit on the page longer.
           if (data.session) sessionStorage.setItem('slack_session', data.session);
           setNotifError('');
           showToast(`\u{1F510} Signed in as ${data.name || data.slack_user_id} — click Enable Daily Notifications to subscribe.`);
@@ -466,52 +427,68 @@ export default function App() {
           setNotifError('Slack sign-in failed: ' + e.message);
           showToast('❌ Slack sign-in failed: ' + e.message);
         })
-        .finally(() => setNotifLoading(false));
+        .finally(() => { setNotifLoading(false); setAuthChecked(true); });
+      // The Slack callback doesn't establish a Tesla session — still ask.
+      checkSession();
       return;
     }
 
     if (!teslaState || state !== teslaState) {
       setError(`OAuth state mismatch (slack=${!!slackState}, tesla=${!!teslaState}). Try again.`);
+      setAuthChecked(true);
       return;
     }
 
     setOauthStatus('Exchanging code for token...');
     setLoading(true);
 
-    post('oauth/app/callback', { code, state })
+    // POST /api/session/create: server exchanges the code, owns the
+    // refresh_token, sets the session cookie, hands back the vehicles.
+    post('session/create', { code, state })
       .then(async (data) => {
-        setTokens({ access_token: data.access_token, refresh_token: data.refresh_token, expires_at: Date.now() + data.expires_in * 1000 });
-        setOauthStatus('\u2705 Connected! Loading vehicles...');
-        const vlist = await fetchVehicles(data.access_token);
+        setLoggedIn(true);
+        const vlist = data.vehicles || [];
+        setVehicles(vlist);
+        if (vlist.length === 1) setSelectedVehicle(vlist[0].id);
+        else if (selectedVehicle && !vlist.some(v => v.id === selectedVehicle)) setSelectedVehicle(null);
         if (vlist.length === 0) {
-          setOauthStatus('\u2705 Connected — no vehicles on this account');
+          setOauthStatus('✅ Connected — no vehicles on this account');
         } else if (vlist.length === 1) {
-          // Just-completed OAuth: user opted in by going through the
-          // login UX, so it's reasonable to wake the car here even if
-          // asleep. The other auto-check (tokens-loaded effect) stays
-          // gated on state==online so subsequent passive page loads
-          // don't drain the battery.
+          // Just-completed OAuth: the user opted in via the login UX, so
+          // it's reasonable to wake the car here even if asleep. The
+          // gentle auto-check (returning visits) stays gated on
+          // state==online so passive loads don't drain the battery.
           const isOnline = vlist[0].state === 'online';
           if (!isOnline) setWaking(true);
           setOauthStatus(isOnline
-            ? '\u2705 Connected! Checking your car...'
-            : '\u2705 Connected \u2014 waking your car (up to 60s)...');
-          try { await checkVehicle(data.access_token, vlist[0].id); }
+            ? '✅ Connected! Checking your car...'
+            : '✅ Connected — waking your car (up to 60s)...');
+          autoCheckedRef.current = true; // this counts as the auto-check
+          try { await checkVehicle(vlist[0].id); }
           finally { setWaking(false); }
         } else {
-          setOauthStatus(`\u2705 Connected — ${vlist.length} vehicles found. Select one to check.`);
+          setOauthStatus(`✅ Connected — ${vlist.length} vehicles found. Select one to check.`);
         }
+        // If this OAuth matched a previously-subscribed account record,
+        // adopt its slack_user_id so the Notifications panel shows the
+        // existing sub. (Triggers the subscriptions fetch via effect.)
+        get('session/me').then(me => { if (me.authenticated && me.slack_user_id) setSlackUserId(me.slack_user_id); }).catch(() => {});
       })
-      .catch(e => setOauthStatus('\u274C ' + e.message))
+      .catch(e => {
+        if (e.status === 400) setOauthStatus('❌ Sign-in setup expired — please connect again.');
+        else setOauthStatus('❌ ' + e.message);
+      })
       .finally(() => {
         sessionStorage.removeItem('tesla_oauth_state');
         setLoading(false);
+        setAuthChecked(true);
       });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
     <div className="container">
-      <h1>{'\uD83D\uDE97'} Tesla Sweeper</h1>
+      <h1>{'🚗'} Tesla Sweeper</h1>
       <p className="subtitle">Check if your car needs to move for Somerville street sweeping</p>
 
       <div className="tabs" role="tablist">
@@ -530,9 +507,11 @@ export default function App() {
 
       {tab === 'app' && (
         <div role="tabpanel">
-          {tokens ? (
+          {!authChecked ? (
+            <p className="oauth-status">Checking your session…</p>
+          ) : loggedIn ? (
             <>
-              <div className="oauth-status">{transientToast || oauthStatus || '\u2705 Connected'}</div>
+              <div className="oauth-status">{transientToast || oauthStatus || '✅ Connected'}</div>
               {vehicles?.length === 0 && (
                 <p style={{fontSize: '0.85rem', color: '#8b949e', marginBottom: 16}}>No vehicles registered on this Tesla account. Add a vehicle in the Tesla app and try again.</p>
               )}
