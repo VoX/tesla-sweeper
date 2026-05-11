@@ -11,6 +11,7 @@ import { brotliMiddleware } from './middleware/brotli.js';
 import { vehiclesRouter } from './routes/vehicles.js';
 import { probesRouter } from './routes/probes.js';
 import { oauthRouter } from './routes/oauth.js';
+import { sessionRouter } from './routes/session.js';
 import { notificationsRouter } from './routes/notifications.js';
 
 export function buildApp() {
@@ -22,6 +23,7 @@ export function buildApp() {
   app.use(vehiclesRouter);
   app.use(probesRouter);
   app.use(oauthRouter);
+  app.use(sessionRouter);
   app.use(notificationsRouter);
   // API 404 catch — must come BEFORE the SPA catch-all so unknown
   // /api/* paths return JSON instead of the index.html bundle.

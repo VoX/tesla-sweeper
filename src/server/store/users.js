@@ -15,6 +15,7 @@ import {
 } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { randomBytes } from 'node:crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // store/ lives at src/server/store/, so the data/ dir is three up.
@@ -37,6 +38,33 @@ function writeAtomic(path, obj) {
   renameSync(tmp, path);
 }
 
+// Canonical empty user-record shape. /session/create and migrateLegacy
+// both build records through here so the field set never drifts.
+export function blankUser(over = {}) {
+  const now = new Date().toISOString();
+  return {
+    id: randomBytes(16).toString('hex'),
+    tesla_account_id: null,    // stable Tesla account id (id_token `sub`); find-or-create key
+    session_cookie_id: null,   // unsigned sid of the bound browser session, if any
+    refresh_token: null,
+    access_token: null,
+    access_expires_at: null,
+    refresh_invalidated_at: null,
+    slack_user_id: null,
+    vehicle_id: null,
+    vehicle_name: null,
+    consecutive_failures: 0,
+    created_at: now,
+    last_seen_at: now,
+    last_check_at: null,
+    last_result: null,
+    last_dm_date: null,
+    last_digest_date: null,
+    last_dm_error_at: null,
+    ...over,
+  };
+}
+
 // One-time migration: subscriptions.json → users.json. Each old sub
 // becomes a user record with the BFF fields defaulted. The old file is
 // renamed to .pre-bff as a safety net (not deleted) — restore by mv.
@@ -55,13 +83,9 @@ function migrateLegacy() {
     throw new Error(`[store] legacy subscriptions.json present but unparseable (${e.message}); moved to ${aside}. Inspect/fix and rename it back to subscriptions.json, or re-OAuth each user.`);
   }
   const now = new Date().toISOString();
-  const users = (legacy.subscriptions || []).map(sub => ({
+  const users = (legacy.subscriptions || []).map(sub => blankUser({
     id: sub.id,
-    session_cookie_id: null,
     refresh_token: sub.refresh_token,
-    access_token: null,
-    access_expires_at: null,
-    refresh_invalidated_at: null,
     slack_user_id: sub.slack_user_id ?? null,
     vehicle_id: sub.vehicle_id != null ? String(sub.vehicle_id) : null,
     vehicle_name: sub.vehicle_name ?? null,
@@ -108,12 +132,16 @@ export function loadUsers() { return loadStore().users; }
 export function loadUserById(id) { return loadUsers().find(u => u.id === id) || null; }
 export function loadUserBySession(sid) { return sid ? (loadUsers().find(u => u.session_cookie_id === sid) || null) : null; }
 export function loadUserBySlackId(slackId) { return loadUsers().find(u => u.slack_user_id === slackId) || null; }
+export function loadUserByTeslaAccountId(acct) { return acct ? (loadUsers().find(u => u.tesla_account_id === acct) || null) : null; }
 
 // The cron's working set: records that have an active notification sub.
 export function loadSubscribedUsers() { return loadUsers().filter(u => u.slack_user_id && u.vehicle_id); }
 
 export function createUser(record) {
   const s = loadStore();
+  if (record.tesla_account_id && s.users.some(u => u.tesla_account_id === record.tesla_account_id)) {
+    console.warn(`[store] createUser: duplicate tesla_account_id ${record.tesla_account_id} — likely a concurrent /session/create race; clean up the orphan if seen`);
+  }
   s.users.push(record);
   saveStore(s);
   return record;

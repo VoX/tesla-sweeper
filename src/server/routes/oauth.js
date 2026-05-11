@@ -3,11 +3,11 @@
 // verified slack_user_id (used by /enable + /disable).
 
 import { Router } from 'express';
-import { randomBytes } from 'node:crypto';
 import { wrap } from '../middleware/errors.js';
 import { teslaTokenExchange, TESLA_BASE } from '../integrations/tesla.js';
 import { signSession } from '../crypto/session.js';
 import { fetchWithTimeout } from '../util/fetch.js';
+import { mintState, consumeState } from '../util/oauth-state.js';
 
 const TESLA_APP_CLIENT_ID = process.env.TESLA_CLIENT_ID || '';
 const TESLA_APP_CLIENT_SECRET = process.env.TESLA_CLIENT_SECRET || '';
@@ -15,36 +15,6 @@ const TESLA_APP_REDIRECT_URI = process.env.TESLA_REDIRECT_URI || '';
 const SLACK_CLIENT_ID = process.env.SLACK_CLIENT_ID || '';
 const SLACK_CLIENT_SECRET = process.env.SLACK_CLIENT_SECRET || '';
 const SLACK_REDIRECT_URI = process.env.SLACK_REDIRECT_URI || '';
-
-// Server-side OAuth `state` registry. /start mints + records, /callback
-// requires a matching+unconsumed entry. Defends against CSRF beyond the
-// SPA's localStorage check (which an attacker who controls the SPA
-// origin could circumvent). 10min TTL covers a sane redirect→exchange
-// window; entries are deleted on use (one-shot).
-const STATE_TTL_MS = 10 * 60 * 1000;
-// Hard cap so an unauthenticated /start flood can't grow the registry
-// to tens of MB even within the TTL window. 10k entries × ~80B = ~800K,
-// fine for our scale (a single human user). Past the cap we GC and, if
-// still full, refuse new mints (caller gets a 503).
-const STATE_MAX_ENTRIES = 10_000;
-const stateStore = new Map();
-function mintState(type) {
-  // Lazy GC on each mint — keeps the map from growing unbounded if a
-  // user starts but never finishes flows. O(N) but N ≤ a handful.
-  const now = Date.now();
-  for (const [k, v] of stateStore) if (v.expires_at < now) stateStore.delete(k);
-  if (stateStore.size >= STATE_MAX_ENTRIES) return null;
-  const state = randomBytes(32).toString('base64url');
-  stateStore.set(state, { type, expires_at: now + STATE_TTL_MS });
-  return state;
-}
-function consumeState(state, expectedType) {
-  if (!state) return false;
-  const entry = stateStore.get(state);
-  if (!entry || entry.expires_at < Date.now() || entry.type !== expectedType) return false;
-  stateStore.delete(state);
-  return true;
-}
 
 export const oauthRouter = Router();
 

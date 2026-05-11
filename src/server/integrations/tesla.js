@@ -57,6 +57,30 @@ export async function teslaTokenExchange(params) {
   return r.json();
 }
 
+// GET /api/1/vehicles → normalized list: [{ id, name, vin, state }].
+// Stringifies v.id at the boundary (Tesla returns 16-digit ints above
+// MAX_SAFE_INTEGER; JSON round-tripping loses precision and the SPA
+// <select> binds value as a string anyway). Injects the stub vehicle
+// when STUB_VEHICLE_ENABLED and the account has none. Throws on a
+// non-2xx with `.status` set so the caller can map it (401 → re-auth).
+export async function listVehicles(accessToken) {
+  const headers = { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
+  const res = await fetchWithTimeout(`${TESLA_BASE}/api/1/vehicles`, { headers });
+  if (!res.ok) {
+    const detail = res.status === 401 ? 'Invalid or expired Tesla token' : `Tesla API error (${res.status})`;
+    const err = new Error(detail);
+    err.status = res.status;
+    if (res.status !== 401) console.error('[vehicles] Tesla API error:', res.status, await res.text().catch(() => ''));
+    throw err;
+  }
+  const vehicles = (await res.json()).response || [];
+  const out = vehicles.map(v => ({ id: String(v.id), name: v.display_name || 'Unknown', vin: v.vin, state: v.state }));
+  if (STUB_VEHICLE_ENABLED && out.length === 0) {
+    out.push({ id: String(STUB_VEHICLE_ID), name: STUB_VEHICLE_NAME, vin: STUB_VEHICLE_VIN, state: 'online', is_stub: true });
+  }
+  return out;
+}
+
 // Fetch vehicle_data with location + charge_state. Wakes the car if it
 // returns 408 (asleep) and retries once. Throws on anything that
 // doesn't parse to a usable response.
