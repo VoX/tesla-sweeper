@@ -86,7 +86,16 @@ export default function App() {
     clearTimeout(pinDebounceRef.current);
   }, []);
 
-  const [slackUserId, setSlackUserId] = useState(() => localStorage.getItem('tesla_slack_user_id') || '');
+  // The slack id baked into a live HMAC session (token shape is
+  // `${slackUserId}.${exp}.${mac}`) is authoritative — prefer it over
+  // localStorage, which can hold a stale value somebody typed into the
+  // manual "paste your slack id" box on a prior visit.
+  const SLACK_ID_RE = /^U[A-Z0-9]+$/;
+  const [slackUserId, setSlackUserId] = useState(() => {
+    const fromSession = (sessionStorage.getItem('slack_session') || '').split('.')[0];
+    if (SLACK_ID_RE.test(fromSession)) return fromSession;
+    return localStorage.getItem('tesla_slack_user_id') || '';
+  });
   const [subscriptions, setSubscriptions] = useState(null);
   const [notifLoading, setNotifLoading] = useState(false);
   const [notifError, setNotifError] = useState('');
@@ -107,7 +116,10 @@ export default function App() {
   }, [selectedVehicle]);
 
   useEffect(() => {
-    if (slackUserId) localStorage.setItem('tesla_slack_user_id', slackUserId);
+    // Only persist a real-looking slack id — otherwise a half-typed or
+    // garbage value in the manual box becomes the sticky default on the
+    // next page load.
+    if (SLACK_ID_RE.test(slackUserId)) localStorage.setItem('tesla_slack_user_id', slackUserId);
   }, [slackUserId]);
 
   useEffect(() => {
