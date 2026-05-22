@@ -17,6 +17,11 @@ export function LocationResultsView({ pos, draggable, onPinMove, data, vehicleIn
         onPinMove={onPinMove}
         popupLabel={popupLabel}
       />
+      {Number.isFinite(pos?.lat) && Number.isFinite(pos?.lng) && (
+        <div style={{ fontSize: '0.72rem', color: '#888', textAlign: 'center', margin: '4px 0 8px', fontFamily: 'monospace' }}>
+          {pos.lat.toFixed(6)}, {pos.lng.toFixed(6)}
+        </div>
+      )}
       <SweepResults
         data={data}
         vehicleName={vehicleInfo?.name}
