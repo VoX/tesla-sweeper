@@ -77,6 +77,7 @@ export async function runNotifications({ mode = 'daily' } = {}) {
         out.car_side = sweep.car_side || null;
         out.sweep_events = sweep.sweep_events || [];
         out.side_detection = sweep.side_detection || null;
+        out.nearest_note = sweep.nearest_note || null;
         // Canonicalize on the OSM-detected car-side house number — the
         // reverse-geocode often returns the closest building (which can
         // be on the opposite curb, especially for oversized lots) and
@@ -123,7 +124,7 @@ export async function runNotifications({ mode = 'daily' } = {}) {
         if (!out.plan || !shouldDispatchPlan(out.plan)) continue;
         if (out.last_dm_date === todayET) { out.dm_skipped = 'already-sent-today'; continue; }
         const dm = await postSlackDM(out.slack_user_id,
-          formatPlanDM({ vehicleName: out.vehicle_name, address: out.address, plan: out.plan }));
+          formatPlanDM({ vehicleName: out.vehicle_name, address: out.address, plan: out.plan, nearestNote: out.nearest_note }));
         out.dm_sent = dm.ok;
         out.dm_error = dm.error || null;
         if (dm.ok) patchUser(out.sub_id, { last_dm_date: todayET });
@@ -136,7 +137,7 @@ export async function runNotifications({ mode = 'daily' } = {}) {
         if (!out.plan) continue;
         if (out.last_digest_date === todayET) { out.digest_skipped = 'already-sent-today'; continue; }
         const dm = await postSlackDM(out.slack_user_id,
-          formatWeeklyDigest({ vehicleName: out.vehicle_name, address: out.address, plan: out.plan }));
+          formatWeeklyDigest({ vehicleName: out.vehicle_name, address: out.address, plan: out.plan, nearestNote: out.nearest_note }));
         out.digest_sent = dm.ok;
         out.digest_error = dm.error || null;
         if (dm.ok) patchUser(out.sub_id, { last_digest_date: todayET });

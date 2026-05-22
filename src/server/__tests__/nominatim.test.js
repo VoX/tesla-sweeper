@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock the HTTP seam so reverseGeocodeLocation runs without network.
 vi.mock('../util/fetch.js', () => ({
@@ -11,7 +11,14 @@ const { reverseGeocodeLocation } = await import('../integrations/nominatim.js');
 
 const geoResp = (address) => ({ ok: true, json: async () => ({ address, display_name: 'x' }) });
 
-beforeEach(() => { vi.clearAllMocks(); });
+let setTimeoutSpy;
+beforeEach(() => {
+  vi.clearAllMocks();
+  // reverseGeocodeLocation enforces Nominatim's 1 req/sec via a real
+  // setTimeout; fire it synchronously so the suite doesn't pay ~1s/call.
+  setTimeoutSpy = vi.spyOn(global, 'setTimeout').mockImplementation((fn) => { fn(); return 0; });
+});
+afterEach(() => { setTimeoutSpy.mockRestore(); });
 
 describe('reverseGeocodeLocation — house_number normalization', () => {
   // Recollect's address-suggest only matches a bare leading integer. OSM emits

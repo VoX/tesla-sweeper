@@ -47,6 +47,9 @@ export async function runSweepCheck({ address, today_date, past_noon = false, la
     place = await nearestSameSideAddress(parsedHouseNum, streetName);
     if (!place) return { found: false, message: 'Address not found in Somerville sweeping database' };
     nearestNote = `nearest indexed address on your side: ${place.name}`;
+    // [addr-fallback] in journalctl = exact number absent from Recollect, a
+    // neighbor's schedule is being reused; grep to gauge how often gaps fire.
+    console.warn(`[sweep-check] [addr-fallback] "${address}" not indexed; using ${place.name}`);
   }
 
   const rawEvents = await fetchSweepEvents(place.place_id, todayStr, future.toISOString().slice(0, 10));

@@ -293,7 +293,7 @@ export default function App() {
       setSweepData(data);
       saveCachedCheck(vehicleId, { mapPos: mapPosVal, vehicleInfo: vehicleInfoVal, sweepData: data });
     } else {
-      setError(`"${addr}" not in Somerville sweeping database.`);
+      setError(data.message || `"${addr}" not in Somerville sweeping database.`);
     }
   };
 

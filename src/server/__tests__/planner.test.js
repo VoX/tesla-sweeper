@@ -321,6 +321,17 @@ describe('formatPlanDM — message smoke tests', () => {
   it('routine flips do NOT include the URL footer', () => {
     expect(fmt(cls([ev('2026-05-12', 'even'), ev('2026-05-26', 'odd')]))).not.toContain('sweeper.bitvox.me');
   });
+
+  it('discloses the neighbor-schedule note in the footer when nearestNote is set', () => {
+    const note = 'nearest indexed address on your side: 40 Atherton St';
+    const m = formatPlanDM({ vehicleName: 'T', address: 'A', nearestNote: note,
+      plan: cls([ev('2026-05-12', 'even'), ev('2026-05-26', 'odd')]) });
+    expect(m).toContain(note);
+  });
+
+  it('omits the neighbor note when the exact address resolved', () => {
+    expect(fmt(cls([ev('2026-05-12', 'even'), ev('2026-05-26', 'odd')]))).not.toContain('nearest indexed');
+  });
 });
 
 describe('formatWeeklyDigest', () => {
@@ -342,5 +353,12 @@ describe('formatWeeklyDigest', () => {
   it('digest plan recommends off-street for triple-flip', () => {
     const m = digest(cls([ev('2026-05-12', 'even'), ev('2026-05-14', 'odd'), ev('2026-05-16', 'even')]));
     expect(m).toContain('park off-street through');
+  });
+
+  it('discloses the neighbor-schedule note in the footer when nearestNote is set', () => {
+    const note = 'nearest indexed address on your side: 40 Atherton St';
+    const m = formatWeeklyDigest({ vehicleName: 'T', address: 'A', nearestNote: note,
+      plan: cls([ev('2026-05-12', 'even'), ev('2026-05-14', 'odd')]) });
+    expect(m).toContain(note);
   });
 });

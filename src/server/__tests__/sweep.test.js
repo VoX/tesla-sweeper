@@ -165,5 +165,7 @@ describe('runSweepCheck — nearest-same-side fallback for Recollect gaps', () =
     const out = await runSweepCheck({ address: '36 Atherton Street', city: 'Somerville', today_date: '2026-05-08', lat: 42.3, lng: -71.1 });
     expect(out.found).toBe(false);
     expect(out.message).toMatch(/not found/i);
+    // Bounded probe budget: 1 exact + 12 fallback probes (±2..±12, both dirs).
+    expect(suggestAddress).toHaveBeenCalledTimes(13);
   });
 });

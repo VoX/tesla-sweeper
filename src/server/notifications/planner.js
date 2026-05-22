@@ -84,7 +84,7 @@ export function shouldDispatchPlan(plan) {
 // Daily DM — action verb leads, metadata follows. URL only kept where
 // it IS the action (unknown-side). `safe` returns empty so a stray call
 // can't render `Sweep .` if dispatch logic ever changes.
-export function formatPlanDM({ vehicleName, address, plan }) {
+export function formatPlanDM({ vehicleName, address, plan, nearestNote }) {
   if (!plan || plan.class === 'safe') return '';
   const e = plan.primaryEvent;
   const opp = plan.conflictEvent;
@@ -139,20 +139,20 @@ export function formatPlanDM({ vehicleName, address, plan }) {
       // class above is exhaustive and `safe` returns early up top.
       throw new Error(`formatPlanDM: unhandled plan class '${plan.class}'`);
   }
-  return `${head}\n${footer(vehicleName, address)}`;
+  return `${head}\n${footer(vehicleName, address, nearestNote)}`;
 }
 
-export function formatWeeklyDigest({ vehicleName, address, plan }) {
+export function formatWeeklyDigest({ vehicleName, address, plan, nearestNote }) {
   const events = plan.windowEvents;
   const head = `:broom: *${vehicleName}* — sweep schedule for the week`;
   if (!events.length) {
-    return `${head}\n  • clear all week — nothing to do.\n${footer(vehicleName, address)}`;
+    return `${head}\n  • clear all week — nothing to do.\n${footer(vehicleName, address, nearestNote)}`;
   }
   const lines = events.map(ev => {
     const tag = ev.side === 'both' ? '*BOTH*' : `*${ev.side.toUpperCase()}*`;
     return `  • ${formatDay(ev.date)}: ${tag} ${shortTime(ev.time)}`;
   }).join('\n');
-  return `${head}:\n${lines}\n\n*Plan:* ${digestRecommendation(plan)}\n${footer(vehicleName, address)}\n<${APP_URL}>`;
+  return `${head}:\n${lines}\n\n*Plan:* ${digestRecommendation(plan)}\n${footer(vehicleName, address, nearestNote)}\n<${APP_URL}>`;
 }
 
 function digestRecommendation(plan) {
@@ -187,8 +187,12 @@ function digestRecommendation(plan) {
   }
 }
 
-function footer(vehicleName, address) {
-  return `_${vehicleName}${address ? ` · ${address}` : ''}_`;
+function footer(vehicleName, address, nearestNote) {
+  const base = `_${vehicleName}${address ? ` · ${address}` : ''}_`;
+  // When the schedule came from a neighbor (exact address absent from
+  // Recollect), disclose it in the DM too — otherwise an auto-DM silently
+  // presents a neighbor's sweep days as the user's own.
+  return nearestNote ? `${base}\n_(${nearestNote})_` : base;
 }
 
 export function daysBetween(a, b) {
