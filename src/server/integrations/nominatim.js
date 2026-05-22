@@ -44,7 +44,12 @@ export async function reverseGeocodeLocation(lat, lng) {
   const a = data.address || {};
   const out = {
     street: a.road || '',
-    house_number: a.house_number || '',
+    // OSM tags multi-address building nodes with a `;`-joined (or `,`-joined)
+    // house_number, e.g. "58;60" for a Somerville two-family. Recollect's
+    // address-suggest can't match "58;60 Atherton Street" (returns nothing →
+    // "Address not found"), and Somerville is full of these, so take the first
+    // number. Both the SPA and the cron build the lookup address from this.
+    house_number: (a.house_number || '').split(/[;,]/)[0].trim(),
     city: a.city || a.town || a.village || '',
     state: a.state || '',
     display_name: data.display_name || '',
