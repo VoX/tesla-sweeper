@@ -44,12 +44,14 @@ export async function reverseGeocodeLocation(lat, lng) {
   const a = data.address || {};
   const out = {
     street: a.road || '',
-    // OSM tags multi-address building nodes with a `;`-joined (or `,`-joined)
-    // house_number, e.g. "58;60" for a Somerville two-family. Recollect's
-    // address-suggest can't match "58;60 Atherton Street" (returns nothing →
-    // "Address not found"), and Somerville is full of these, so take the first
-    // number. Both the SPA and the cron build the lookup address from this.
-    house_number: (a.house_number || '').split(/[;,]/)[0].trim(),
+    // OSM emits house_number formats Recollect's address-suggest can't match:
+    // `;`/`,`-joined multi-addresses ("58;60"), `-`/`/` ranges ("134-136",
+    // "151/153"), letter/rear suffixes ("215B", "29R"), and fractionals
+    // ("25 1/2"). Recollect only matches a bare leading integer, so reduce to
+    // that for the lookup (check.js already uses the same `^\d+` for parity).
+    // Both the SPA and cron build the lookup address from this; display_name
+    // keeps the raw OSM string.
+    house_number: (String(a.house_number || '').match(/^\d+/)?.[0]) || '',
     city: a.city || a.town || a.village || '',
     state: a.state || '',
     display_name: data.display_name || '',
