@@ -288,7 +288,7 @@ export default function App() {
       return;
     }
 
-    const data = await post('sweep-check', { address: addr, today_date: clientToday(), past_noon: pastNoon(), lat: vehicle.latitude, lng: vehicle.longitude });
+    const data = await post('sweep-check', { address: addr, today_date: clientToday(), past_noon: pastNoon(), lat: vehicle.latitude, lng: vehicle.longitude, city: geo.city });
     if (data.found) {
       setSweepData(data);
       saveCachedCheck(vehicleId, { mapPos: mapPosVal, vehicleInfo: vehicleInfoVal, sweepData: data });
@@ -365,7 +365,7 @@ export default function App() {
       const addr = addrFromGeo(geo) || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
       if (!ctrl.signal.aborted) setManualPos({ lat, lng, street: geo.street || 'Unknown' });
       const data = await post('sweep-check', {
-        address: addr, today_date: clientToday(), past_noon: pastNoon(), lat, lng,
+        address: addr, today_date: clientToday(), past_noon: pastNoon(), lat, lng, city: geo.city,
       }, ctrl.signal);
       if (!ctrl.signal.aborted) setManualSweepData(data);
     } catch (e) {

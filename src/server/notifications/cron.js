@@ -68,7 +68,7 @@ export async function runNotifications({ mode = 'daily' } = {}) {
         out.address = geo.display_name || addr;
         if (!addr) throw new Error('No street resolved from coordinates');
 
-        const sweep = await runSweepCheck({ address: addr, today_date: todayET, lat: latitude, lng: longitude });
+        const sweep = await runSweepCheck({ address: addr, today_date: todayET, lat: latitude, lng: longitude, city: geo.city });
         out.found = !!sweep.found;
         out.days_until_next = sweep.days_until_next ?? null;
         out.status = sweep.status || null;

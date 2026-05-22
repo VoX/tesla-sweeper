@@ -122,3 +122,19 @@ describe('runSweepCheck — response shape', () => {
     expect(out.longitude).toBe(-71.1);
   });
 });
+
+describe('runSweepCheck — out-of-Somerville city guard', () => {
+  it('short-circuits (no Recollect query) when the geocoded city is not Somerville', async () => {
+    const out = await runSweepCheck({ address: '20 Oak Street', city: 'Cambridge', today_date: '2026-05-08', lat: 42.374, lng: -71.099 });
+    expect(out.found).toBe(false);
+    expect(out.message).toMatch(/Cambridge/);
+    expect(suggestAddress).not.toHaveBeenCalled();
+  });
+
+  it('proceeds normally when the city is Somerville', async () => {
+    parseSweepFlags.mockReturnValueOnce([sweep('2026-05-15', 'even')]);
+    const out = await runSweepCheck({ address: '12 Harvard St', city: 'Somerville', today_date: '2026-05-08', lat: 42.3, lng: -71.1 });
+    expect(suggestAddress).toHaveBeenCalled();
+    expect(out.found).toBe(true);
+  });
+});

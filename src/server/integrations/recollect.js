@@ -12,7 +12,12 @@ export async function suggestAddress(address) {
     { headers: { 'User-Agent': UA } }
   );
   if (!res.ok) throw new Error(`Recollect address suggest ${res.status}`);
-  return res.json();
+  const data = await res.json();
+  // Recollect's Somerville suggest fuzzy-matches into adjacent municipalities
+  // when Somerville lacks the street (e.g. "15 North Union St" → "15 Union St,
+  // Cambridge", service_id 761). Those carry a foreign sweeping schedule, so
+  // keep only true Somerville (service 349) results.
+  return Array.isArray(data) ? data.filter(s => Number(s?.service_id) === RECOLLECT_SERVICE) : [];
 }
 
 export async function fetchSweepEvents(place_id, after, before) {

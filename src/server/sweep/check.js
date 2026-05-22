@@ -4,7 +4,13 @@
 import { suggestAddress, fetchSweepEvents, parseSweepFlags } from '../integrations/recollect.js';
 import { whichSide } from '../integrations/overpass.js';
 
-export async function runSweepCheck({ address, today_date, past_noon = false, lat, lng }) {
+export async function runSweepCheck({ address, today_date, past_noon = false, lat, lng, city }) {
+  // The geocoded city is the only reliable signal the car is parked OUTSIDE
+  // Somerville — Recollect's suggest can fuzzy-match a same-named street in
+  // another town, so short-circuit before we ever query it.
+  if (city && city.trim().toLowerCase() !== 'somerville') {
+    return { found: false, message: `This location is in ${city}, outside Somerville's street-sweeping coverage.` };
+  }
   const todayStr = today_date || new Date().toISOString().slice(0, 10);
   const today = new Date(todayStr + 'T12:00:00Z');
   const future = new Date(today); future.setDate(future.getDate() + 30);
