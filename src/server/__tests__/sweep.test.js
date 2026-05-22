@@ -31,8 +31,8 @@ beforeEach(() => {
 });
 
 describe('runSweepCheck — branches', () => {
-  it('returns found:false when Recollect has no suggestion', async () => {
-    suggestAddress.mockResolvedValueOnce([]);
+  it('returns found:false when neither the exact address nor any same-side neighbor is indexed', async () => {
+    suggestAddress.mockResolvedValue([]); // exact + every fallback probe empty
     const out = await runSweepCheck({ address: '12 Harvard St', today_date: '2026-05-08', lat: 42.3, lng: -71.1 });
     expect(out.found).toBe(false);
     expect(out.message).toMatch(/not found/);
@@ -144,5 +144,26 @@ describe('runSweepCheck — out-of-Somerville city guard', () => {
     const out = await runSweepCheck({ address: '12 Harvard St', today_date: '2026-05-08', lat: 42.3, lng: -71.1 });
     expect(suggestAddress).toHaveBeenCalled();
     expect(out.found).toBe(true);
+  });
+});
+
+describe('runSweepCheck — nearest-same-side fallback for Recollect gaps', () => {
+  it('uses the nearest indexed same-side address when the exact number is missing', async () => {
+    // Exact "36 ..." misses; any neighbor probe returns an indexed parcel.
+    suggestAddress.mockImplementation(async (q) =>
+      q.startsWith('36 ') ? [] : [{ place_id: 'pNbr', name: '38 Atherton St, Somerville' }]);
+    parseSweepFlags.mockReturnValueOnce([sweep('2026-05-15', 'even')]);
+    const out = await runSweepCheck({ address: '36 Atherton Street', city: 'Somerville', today_date: '2026-05-08', lat: 42.3, lng: -71.1 });
+    expect(out.found).toBe(true);
+    expect(out.place_id).toBe('pNbr');
+    expect(out.nearest_note).toMatch(/38 Atherton St/);
+    expect(out.message).toMatch(/nearest indexed address/);
+  });
+
+  it('still returns not-found when no same-side neighbor is indexed', async () => {
+    suggestAddress.mockResolvedValue([]); // exact + every probe empty
+    const out = await runSweepCheck({ address: '36 Atherton Street', city: 'Somerville', today_date: '2026-05-08', lat: 42.3, lng: -71.1 });
+    expect(out.found).toBe(false);
+    expect(out.message).toMatch(/not found/i);
   });
 });
