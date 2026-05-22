@@ -129,11 +129,19 @@ describe('runSweepCheck — out-of-Somerville city guard', () => {
     expect(out.found).toBe(false);
     expect(out.message).toMatch(/Cambridge/);
     expect(suggestAddress).not.toHaveBeenCalled();
+    expect(fetchSweepEvents).not.toHaveBeenCalled();
   });
 
   it('proceeds normally when the city is Somerville', async () => {
     parseSweepFlags.mockReturnValueOnce([sweep('2026-05-15', 'even')]);
     const out = await runSweepCheck({ address: '12 Harvard St', city: 'Somerville', today_date: '2026-05-08', lat: 42.3, lng: -71.1 });
+    expect(suggestAddress).toHaveBeenCalled();
+    expect(out.found).toBe(true);
+    expect(out.message || '').not.toMatch(/outside Somerville/);
+  });
+
+  it('proceeds when city is absent (guard fails open, never blocks a real lookup)', async () => {
+    const out = await runSweepCheck({ address: '12 Harvard St', today_date: '2026-05-08', lat: 42.3, lng: -71.1 });
     expect(suggestAddress).toHaveBeenCalled();
     expect(out.found).toBe(true);
   });

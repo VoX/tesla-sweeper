@@ -32,4 +32,9 @@ describe('suggestAddress — Somerville-only filtering', () => {
     const out = await suggestAddress('58 Atherton Street');
     expect(out.map(s => s.place_id)).toEqual(['som']);
   });
+
+  it('drops items missing a service_id (fails closed to not-found, never wrong-city data)', async () => {
+    fetchWithTimeout.mockResolvedValue(resp([{ name: '5 Somewhere St', place_id: 'x' }]));
+    expect(await suggestAddress('5 Somewhere Street')).toEqual([]);
+  });
 });

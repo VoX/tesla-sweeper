@@ -51,7 +51,7 @@ export async function reverseGeocodeLocation(lat, lng) {
     // that for the lookup (check.js already uses the same `^\d+` for parity).
     // Both the SPA and cron build the lookup address from this; display_name
     // keeps the raw OSM string.
-    house_number: (String(a.house_number || '').match(/^\d+/)?.[0]) || '',
+    house_number: String(a.house_number || '').match(/^\d+/)?.[0] || '',
     city: a.city || a.town || a.village || '',
     state: a.state || '',
     display_name: data.display_name || '',
