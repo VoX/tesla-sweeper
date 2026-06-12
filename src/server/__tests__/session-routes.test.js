@@ -15,7 +15,10 @@ process.env.TESLA_CLIENT_SECRET = 'test-secret';
 process.env.TESLA_REDIRECT_URI = 'https://sweeper.bitvox.me/oauth';
 
 // Slack DM is best-effort and unrelated to what these tests assert.
-vi.mock('../integrations/slack.js', () => ({ postSlackDM: vi.fn().mockResolvedValue({ ok: true }) }));
+vi.mock('../integrations/slack.js', () => ({
+  postSlackDM: vi.fn().mockResolvedValue({ ok: true }),
+  escapeSlack: (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+}));
 
 const { buildApp } = await import('../app.js');
 const { saveStore, loadUsers, loadUserByTeslaAccountId, createUser, blankUser, patchUser } = await import('../store/users.js');

@@ -1,7 +1,17 @@
 import { describe, it, expect } from 'vitest';
-import {
-  classifyWeek, shouldDispatchPlan, formatPlanDM, formatWeeklyDigest, daysBetween,
-} from '../notifications/planner.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// planner.js imports escapeSlack from integrations/slack.js, which pulls
+// in the install store (-> store/users.js, which migrates at import time)
+// — point it at a throwaway dir BEFORE the import below.
+process.env.SWEEPER_DATA_DIR = mkdtempSync(join(tmpdir(), 'sweeper-planner-test-'));
+
+const {
+  classifyWeek, shouldDispatchPlan, formatPlanDM, formatWeeklyDigest, formatDayOfDM,
+  daysBetween, isOffSeason, isSeasonPreviewWindow,
+} = await import('../notifications/planner.js');
 
 const TIME = '8:00 AM - 12:00 PM';
 const TODAY = '2026-05-11'; // Monday
@@ -114,12 +124,12 @@ describe('classifyWeek — imminent-opposite', () => {
     expect(p.class).toBe('lone-flip');
   });
 
-  it('shouldDispatchPlan fires for imminent-opposite at T-1/T-2/T-3', () => {
+  it('shouldDispatchPlan fires for imminent-opposite at the T-3 heads-up', () => {
     const p = classifyWeek({
       events: [ev('2026-05-07', 'odd'), ev('2026-05-08', 'even')],
-      carSide: 'even', todayET: '2026-05-06',
+      carSide: 'even', todayET: '2026-05-05',
     });
-    expect(p.daysUntilPrimary).toBe(2);
+    expect(p.daysUntilPrimary).toBe(3);
     expect(shouldDispatchPlan(p)).toBe(true);
   });
 });
@@ -180,7 +190,9 @@ describe('classifyWeek — triple-flip', () => {
     expect(p.class).toBe('triple-flip');
     expect(p.primaryEvent.side).toBe('even');
     expect(p.daysUntilPrimary).toBe(2);
-    expect(shouldDispatchPlan(p)).toBe(true);
+    // T-2 no longer dispatches (3/1 cadence) — the anchor itself is the
+    // regression guard; dispatch at T-2 would now be a bug.
+    expect(shouldDispatchPlan(p)).toBe(false);
   });
 });
 
@@ -228,7 +240,7 @@ describe('classifyWeek — unknown-side', () => {
 });
 
 describe('shouldDispatchPlan', () => {
-  it.each([[1, true], [2, true], [3, true], [0, false], [4, false], [5, false]])(
+  it.each([[1, true], [2, false], [3, true], [0, false], [4, false], [5, false]])(
     'days=%i → %s', (d, expected) => expect(shouldDispatchPlan({ class: 'lone-flip', daysUntilPrimary: d })).toBe(expected),
   );
 
@@ -360,5 +372,60 @@ describe('formatWeeklyDigest', () => {
     const m = formatWeeklyDigest({ vehicleName: 'T', address: 'A', nearestNote: note,
       plan: cls([ev('2026-05-12', 'even'), ev('2026-05-14', 'odd')]) });
     expect(m).toContain(note);
+  });
+});
+
+describe('season gate helpers', () => {
+  it.each([
+    ['2026-01-01', true], ['2026-02-15', true], ['2026-03-28', true],
+    // Mar 29-31 are IN-season: T-3/T-1 dispatch for Apr 1-3 sweeps lands there.
+    ['2026-03-29', false], ['2026-03-31', false],
+    ['2026-04-01', false], ['2026-07-04', false], ['2026-12-31', false],
+  ])('isOffSeason(%s) → %s', (d, expected) => expect(isOffSeason(d)).toBe(expected));
+
+  it.each([
+    ['2026-03-25', true], ['2026-03-29', true], ['2026-03-31', true],
+    ['2026-03-24', false], ['2026-04-01', false], ['2026-02-28', false],
+  ])('isSeasonPreviewWindow(%s) → %s', (d, expected) => expect(isSeasonPreviewWindow(d)).toBe(expected));
+});
+
+describe('formatPlanDM — day-1 LAST CALL framing', () => {
+  it('prefixes the day-1 DM and not the day-3 DM', () => {
+    const mk = (today) => formatPlanDM({
+      vehicleName: 'T', address: 'A',
+      plan: classifyWeek({ events: [ev('2026-05-12', 'even')], carSide: 'even', todayET: today }),
+    });
+    expect(mk('2026-05-11')).toContain('LAST CALL');
+    expect(mk('2026-05-09')).not.toContain('LAST CALL');
+  });
+});
+
+describe('formatDayOfDM', () => {
+  it('leads with MOVE NOW and carries the check message + footer', () => {
+    const m = formatDayOfDM({ vehicleName: 'T', address: '12 Harvard St', message: 'Sweeping TODAY on YOUR side. $50 fine!', nearestNote: null });
+    expect(m).toContain('MOVE NOW');
+    expect(m).toContain('8AM TODAY');
+    expect(m).toContain('$50 fine');
+    expect(m).toContain('12 Harvard St');
+  });
+});
+
+describe('mrkdwn escaping of untrusted interpolations', () => {
+  it('escapes & < > in vehicle name, address and nearest note in the footer', () => {
+    const plan = classifyWeek({ events: [ev('2026-05-12', 'even')], carSide: 'even', todayET: '2026-05-11' });
+    const m = formatPlanDM({
+      vehicleName: 'Kit & Co <X>', address: '5 A&B St <evil>', plan,
+      nearestNote: 'nearest <indexed>',
+    });
+    expect(m).toContain('Kit &amp; Co &lt;X&gt;');
+    expect(m).toContain('5 A&amp;B St &lt;evil&gt;');
+    expect(m).toContain('nearest &lt;indexed&gt;');
+    expect(m).not.toContain('<evil>');
+  });
+
+  it('keeps the planner mrkdwn itself intact (bold action lines survive)', () => {
+    const plan = classifyWeek({ events: [ev('2026-05-12', 'even')], carSide: 'even', todayET: '2026-05-09' });
+    const m = formatPlanDM({ vehicleName: 'T', address: 'A', plan });
+    expect(m).toMatch(/\*Move to ODD by .+\*/);
   });
 });

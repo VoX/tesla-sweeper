@@ -10,9 +10,19 @@ function botToken() {
   return installedBotToken() || process.env.SLACK_BOT_TOKEN || '';
 }
 
-// Post a Slack DM via chat.postMessage. mrkdwn:false defangs any
-// `<...>`/`*...*` chars that slipped in from user-supplied vehicle
-// names or Nominatim address strings — DMs render plain text.
+// Escape Slack mrkdwn control characters in UNTRUSTED interpolations
+// (vehicle names, OSM/Recollect address strings) per Slack's escaping
+// rules. Only & < > are special; * _ ~ ` are NOT escapable in Slack and
+// at worst toggle formatting inside the substring — acceptable.
+export function escapeSlack(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Post a Slack DM via chat.postMessage. Messages render as mrkdwn (the
+// planner's *bold action lines* and <links> depend on it — a 2026-05
+// mrkdwn:false hardening silently broke every styled DM into literal
+// asterisks). Untrusted substrings must be escaped by the CALLER via
+// escapeSlack() before interpolation.
 export async function postSlackDM(slack_user_id, text) {
   const token = botToken();
   if (!token) return { ok: false, error: 'no Slack bot token (slack-install.json or SLACK_BOT_TOKEN)' };
@@ -27,7 +37,7 @@ export async function postSlackDM(slack_user_id, text) {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json; charset=utf-8',
       },
-      body: JSON.stringify({ channel: slack_user_id, text, mrkdwn: false }),
+      body: JSON.stringify({ channel: slack_user_id, text }),
     });
     data = await res.json().catch(() => ({}));
   } catch (e) {

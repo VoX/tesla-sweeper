@@ -1,9 +1,36 @@
 // Cross-side aware notification planner.
 // See docs/notification-scenarios.md for the scenario catalog and reasoning.
 
+import { escapeSlack } from '../integrations/slack.js';
+
 const WINDOW_DAYS = 7;
 const TIGHT_FLIP_DAYS = 3;
 const APP_URL = 'https://sweeper.bitvox.me/';
+
+// Somerville sweeping season is Apr 1 – Dec 31. Off-season the cron
+// must not wake the car (real battery cost, zero information). Pure
+// date-string helpers so the gate is testable without a clock.
+// Mar 29-31 count as IN-season: the T-3/T-1 dispatch for season-opening
+// sweeps (Apr 1-3) lands on those days, and next_event_date must be
+// persisted before the Apr 1 7am gate can work. Three extra wakes/year.
+export function isOffSeason(dateET) {
+  const month = parseInt(String(dateET).slice(5, 7), 10);
+  const day = parseInt(String(dateET).slice(8, 10), 10);
+  if (month === 3 && day >= 29) return false;
+  return month >= 1 && month <= 3;
+}
+
+// Last week of March: the one off-season Sunday digest we DO send — a
+// "season starts Apr 1" heads-up instead of a 13th "clear all week".
+export function isSeasonPreviewWindow(dateET) {
+  const month = parseInt(String(dateET).slice(5, 7), 10);
+  const day = parseInt(String(dateET).slice(8, 10), 10);
+  return month === 3 && day >= 25;
+}
+
+export function formatSeasonPreviewDM({ vehicleName }) {
+  return `:broom: *Street-sweeping season starts Apr 1.* Daily checks for *${escapeSlack(vehicleName)}* resume then — DMs land 3 days and 1 day before each sweep on your side, plus a 7am last call.`;
+}
 
 export function classifyWeek({ events = [], carSide = null, sideDetection = null, todayET }) {
   if (!todayET) throw new Error('classifyWeek: todayET required');
@@ -74,11 +101,13 @@ export function classifyWeek({ events = [], carSide = null, sideDetection = null
   return withPrimary(mine, { class: 'lone-flip', oppositeNextDate: nextOppositeAfter(sorted, oppositeSide, mine.date) });
 }
 
+// Dispatch at 3 days out (heads-up) and 1 day out (last call). Day 2 was
+// dropped 2026-06-12: three near-identical DMs per event trained the
+// reader to skim the one that mattered — distinct day-3/day-1 framing
+// (see formatPlanDM) replaces volume with contrast.
 export function shouldDispatchPlan(plan) {
   if (!plan || plan.class === 'safe') return false;
-  return plan.daysUntilPrimary != null
-    && plan.daysUntilPrimary >= 1
-    && plan.daysUntilPrimary <= 3;
+  return plan.daysUntilPrimary === 3 || plan.daysUntilPrimary === 1;
 }
 
 // Daily DM — action verb leads, metadata follows. URL only kept where
@@ -139,12 +168,23 @@ export function formatPlanDM({ vehicleName, address, plan, nearestNote }) {
       // class above is exhaustive and `safe` returns early up top.
       throw new Error(`formatPlanDM: unhandled plan class '${plan.class}'`);
   }
+  // Day-1 DM is the one that prevents the ticket — frame it unmistakably
+  // differently from the day-3 heads-up.
+  if (plan.daysUntilPrimary === 1) {
+    head = `:rotating_light: *LAST CALL — sweep tomorrow morning.*\n${head}`;
+  }
   return `${head}\n${footer(vehicleName, address, nearestNote)}`;
+}
+
+// Day-of (7am ET) urgent DM: the car is STILL on the swept side with the
+// sweeper due at 8AM. Composed from the live check's message string.
+export function formatDayOfDM({ vehicleName, address, message, nearestNote }) {
+  return `:rotating_light: *MOVE NOW — sweeping starts 8AM TODAY.* ${escapeSlack(message || '')}\n${footer(vehicleName, address, nearestNote)}`;
 }
 
 export function formatWeeklyDigest({ vehicleName, address, plan, nearestNote }) {
   const events = plan.windowEvents;
-  const head = `:broom: *${vehicleName}* — sweep schedule for the week`;
+  const head = `:broom: *${escapeSlack(vehicleName)}* — sweep schedule for the week`;
   if (!events.length) {
     return `${head}\n  • clear all week — nothing to do.\n${footer(vehicleName, address, nearestNote)}`;
   }
@@ -188,11 +228,14 @@ function digestRecommendation(plan) {
 }
 
 function footer(vehicleName, address, nearestNote) {
-  const base = `_${vehicleName}${address ? ` · ${address}` : ''}_`;
+  // vehicleName/address/nearestNote are the untrusted interpolations
+  // (user-named vehicle, OSM + Recollect strings) — escape them here,
+  // now that DMs render as mrkdwn again.
+  const base = `_${escapeSlack(vehicleName)}${address ? ` · ${escapeSlack(address)}` : ''}_`;
   // When the schedule came from a neighbor (exact address absent from
   // Recollect), disclose it in the DM too — otherwise an auto-DM silently
   // presents a neighbor's sweep days as the user's own.
-  return nearestNote ? `${base}\n_(${nearestNote})_` : base;
+  return nearestNote ? `${base}\n_(${escapeSlack(nearestNote)})_` : base;
 }
 
 export function daysBetween(a, b) {
@@ -221,7 +264,9 @@ function nightBefore(date, suffix = 'night') {
 
 function shortTime(t) {
   if (!t) return '';
-  return t.replace(/:00 /g, '').replace(/\s-\s/g, '-');
+  // Recollect-sourced string — escape here (the one chokepoint) since it
+  // lands inside mrkdwn DM lines.
+  return escapeSlack(t.replace(/:00 /g, '').replace(/\s-\s/g, '-'));
 }
 
 function findSameDayPair(events) {

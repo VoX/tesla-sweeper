@@ -66,6 +66,9 @@ export function blankUser(over = {}) {
     last_check_at: null,
     last_result: null,
     last_dm_date: null,
+    last_dm_key: null,        // plan-aware DM dedup: date|class|eventDate
+    last_dayof_date: null,    // 7am last-call dedup
+    next_event_date: null,    // next user-side sweep date; gates the 7am run
     last_digest_date: null,
     last_dm_error_at: null,
     ...over,

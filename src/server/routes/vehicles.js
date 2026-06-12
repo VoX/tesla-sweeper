@@ -10,6 +10,7 @@
 
 import { Router } from 'express';
 import { wrap } from '../middleware/errors.js';
+import { rateLimit } from '../middleware/ratelimit.js';
 import {
   STUB_VEHICLE_LAT, STUB_VEHICLE_LNG, STUB_VEHICLE_NAME,
   isStubVehicle, fetchVehicleData, listVehicles,
@@ -89,7 +90,7 @@ vehiclesRouter.post('/api/check', wrap(async (req, res) => {
   });
 }));
 
-vehiclesRouter.post('/api/reverse-geocode', wrap(async (req, res) => {
+vehiclesRouter.post('/api/reverse-geocode', rateLimit({ perMinute: 12 }), wrap(async (req, res) => {
   const lat = Number(req.body?.lat);
   const lng = Number(req.body?.lng);
   // Reject non-numeric coords at the boundary — otherwise they hit the

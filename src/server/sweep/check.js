@@ -94,7 +94,10 @@ export async function runSweepCheck({ address, today_date, past_noon = false, la
     : null;
 
   const sideLabel = (events) => [...new Set(events.map(e => e.side + ' side'))].join(', ');
-  const carMatches = (events) => !carSide || events.some(e => e.side === carSide);
+  // side:'both' (whole-street sweep) matches EVERY car side — without
+  // this, a both-sides event reads as "other side" and the day-of last
+  // call never fires for whole-street sweeps.
+  const carMatches = (events) => !carSide || events.some(e => e.side === carSide || e.side === 'both');
 
   let status, title, message;
   if (sweepingToday.length) {

@@ -12,7 +12,7 @@ export function NotificationsPanel({ slackUserId, hasSlackSession, enabledForThi
     <div className="card" style={{ marginTop: 16 }}>
       <h3>🔔 Daily Slack Pings</h3>
       <p style={{ fontSize: '0.85rem', color: '#8b949e', marginBottom: 12 }}>
-        Get a slack DM 1, 2, and 3 days before sweeping. Runs at 12pm ET daily; wakes the car briefly to read its location.
+        Get slack DMs 3 days and 1 day before sweeping on your side, plus a 7am last call on sweep day. Checks run at noon and 9pm ET (Apr–Dec season); each check briefly wakes the car to read its location.
       </p>
       {enabledForThis ? (
         <>

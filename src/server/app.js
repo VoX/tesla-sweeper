@@ -13,6 +13,7 @@ import { probesRouter } from './routes/probes.js';
 import { oauthRouter } from './routes/oauth.js';
 import { sessionRouter } from './routes/session.js';
 import { notificationsRouter } from './routes/notifications.js';
+import { slackCommandRouter } from './routes/slack-command.js';
 
 export function buildApp() {
   const app = express();
@@ -25,6 +26,7 @@ export function buildApp() {
   app.use(oauthRouter);
   app.use(sessionRouter);
   app.use(notificationsRouter);
+  app.use(slackCommandRouter);
   // API 404 catch — must come BEFORE the SPA catch-all so unknown
   // /api/* paths return JSON instead of the index.html bundle.
   app.all('/api/*', (req, res) => res.status(404).json({ detail: 'API endpoint not found' }));

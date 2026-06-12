@@ -24,7 +24,7 @@ import {
 } from '../store/users.js';
 import { readSessionCookie } from '../util/session.js';
 import { isStubVehicle } from '../integrations/tesla.js';
-import { postSlackDM } from '../integrations/slack.js';
+import { postSlackDM, escapeSlack } from '../integrations/slack.js';
 import { runNotifications } from '../notifications/cron.js';
 
 const NOTIFICATIONS_RUN_TOKEN = process.env.NOTIFICATIONS_RUN_TOKEN || '';
@@ -38,12 +38,14 @@ export const notificationsRouter = Router();
 // real DM) or an old failure streak.
 const CLEARED_SUB = {
   slack_user_id: null, vehicle_id: null, vehicle_name: null,
-  consecutive_failures: 0, last_dm_date: null, last_digest_date: null, last_dm_error_at: null,
+  consecutive_failures: 0, last_dm_date: null, last_dm_key: null, last_dayof_date: null,
+  last_digest_date: null, last_dm_error_at: null, next_event_date: null,
 };
 // The fresh-sub telemetry reset, applied alongside the new slack/vehicle
 // fields when re-using an existing record (e.g. the cookie-bound one).
 const FRESH_SUB_TELEMETRY = {
-  consecutive_failures: 0, last_dm_date: null, last_digest_date: null, last_dm_error_at: null,
+  consecutive_failures: 0, last_dm_date: null, last_dm_key: null, last_dayof_date: null,
+  last_digest_date: null, last_dm_error_at: null, next_event_date: null,
 };
 
 // One subscription per slack_user_id. Clears the sub on every record for
@@ -99,7 +101,7 @@ notificationsRouter.post('/api/notifications/enable', wrap(async (req, res) => {
   // the error so the SPA can hint at it.
   const dm = await postSlackDM(
     slack_user_id,
-    `:car: Tesla sweeper notifications enabled for *${vname}*. I'll DM you 1, 2, and 3 days before each sweep at noon ET. Disable anytime at https://sweeper.bitvox.me/.`
+    `:car: Tesla sweeper notifications enabled for *${escapeSlack(vname)}*. I'll DM you 3 days and 1 day before each sweep on your side, plus a 7am last call on sweep day (season runs Apr-Dec). Disable anytime at <https://sweeper.bitvox.me/>.`
   );
   res.json({ enabled: true, id: cookieUser.id, test_dm_ok: dm.ok, test_dm_error: dm.error || null });
 }));
@@ -153,5 +155,11 @@ notificationsRouter.post('/api/notifications/run', wrap(async (req, res) => {
   if (!bearerOk(req.get('authorization') || '', NOTIFICATIONS_RUN_TOKEN)) {
     return res.status(401).json({ detail: 'Unauthorized' });
   }
-  res.json(await runNotifications());
+  // Mode passthrough so a missed evening/dayof/weekly fire can be
+  // recovered out-of-band (runNotifications validates again).
+  const mode = req.body?.mode || 'daily';
+  if (!['daily', 'evening', 'dayof', 'weekly'].includes(mode)) {
+    return res.status(400).json({ detail: `invalid mode '${mode}'` });
+  }
+  res.json(await runNotifications({ mode }));
 }));

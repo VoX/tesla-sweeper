@@ -7,6 +7,7 @@ import './config.js';
 import { buildApp } from './app.js';
 import {
   startNotificationCron, maybeRecoverMissedRun, maybeRecoverMissedDigest,
+  maybeRecoverMissedDayof,
 } from './notifications/cron.js';
 
 // Exit on uncaught exceptions — continuing leaves the process in
@@ -22,6 +23,11 @@ buildApp().listen(PORT, '127.0.0.1', async () => {
   // Sequential — runNotifications is single-flight by mode and throws
   // on cross-mode overlap, so a Sunday-8PM-ish boot would otherwise
   // race the daily and weekly recoveries and one would silently fail.
+  // Day-of first (its window is 7am-noon; the others are post-noon —
+  // windows are disjoint but keep the chain sequential regardless: the
+  // single-flight guard throws on cross-mode overlap).
+  try { await maybeRecoverMissedDayof(); }
+  catch (e) { console.error('[cron] missed-dayof recovery failed:', e); }
   try { await maybeRecoverMissedRun(); }
   catch (e) { console.error('[cron] missed-run recovery failed:', e); }
   try { await maybeRecoverMissedDigest(); }
