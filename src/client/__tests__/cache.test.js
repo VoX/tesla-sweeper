@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { readCachedCheck, saveCachedCheck, clearCachedCheck } from '../lib/cache.js';
+import { readCachedCheck, saveCachedCheck, clearCachedCheck, cacheBasis } from '../lib/cache.js';
 
 beforeEach(() => {
   localStorage.clear();
@@ -21,13 +21,22 @@ describe('readCachedCheck', () => {
   });
 
   it('returns null when vehicle_id mismatches', () => {
-    localStorage.setItem('tesla_last_check', JSON.stringify({ v: 1, vehicle_id: 'v2', at: Date.now() }));
+    localStorage.setItem('tesla_last_check', JSON.stringify({ v: 2, vehicle_id: 'v2', at: Date.now(), basis: cacheBasis() }));
     expect(readCachedCheck('v1')).toBeNull();
   });
 
   it('returns null for entries older than 6h', () => {
     const sevenHoursAgo = Date.now() - 7 * 60 * 60 * 1000;
-    localStorage.setItem('tesla_last_check', JSON.stringify({ v: 1, vehicle_id: 'v1', at: sevenHoursAgo }));
+    localStorage.setItem('tesla_last_check', JSON.stringify({ v: 2, vehicle_id: 'v1', at: sevenHoursAgo, basis: cacheBasis() }));
+    expect(readCachedCheck('v1')).toBeNull();
+  });
+
+  it('returns null when the day/noon basis changed (v2 staleness rule)', () => {
+    // Cached pre-noon, read post-noon (same day): the sweep verdict basis moved.
+    localStorage.setItem('tesla_last_check', JSON.stringify({
+      v: 2, vehicle_id: 'v1', at: Date.now(),
+      basis: cacheBasis(new Date(2026, 0, 1, 9, 0, 0)),
+    }));
     expect(readCachedCheck('v1')).toBeNull();
   });
 
@@ -50,7 +59,7 @@ describe('saveCachedCheck', () => {
   it('stamps version + vehicle_id + at + payload fields', () => {
     saveCachedCheck('v1', { mapPos: { lat: 42 } });
     const stored = JSON.parse(localStorage.getItem('tesla_last_check'));
-    expect(stored.v).toBe(1);
+    expect(stored.v).toBe(2);
     expect(stored.vehicle_id).toBe('v1');
     expect(stored.mapPos).toEqual({ lat: 42 });
     expect(typeof stored.at).toBe('number');

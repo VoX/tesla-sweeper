@@ -143,8 +143,15 @@ describe('GET /api/notifications/status', () => {
     expect(r.status).toBe(400);
   });
 
-  it('returns 200 with subscriptions array', async () => {
+  it('returns 401 without a valid slack_session (fat-review gate)', async () => {
     const r = await request(app).get('/api/notifications/status?slack_user_id=U060NLFUM');
+    expect(r.status).toBe(401);
+  });
+
+  it('returns 200 with subscriptions array when the session is valid', async () => {
+    const { signSession } = await import('../crypto/session.js');
+    const sess = encodeURIComponent(signSession('U060NLFUM'));
+    const r = await request(app).get(`/api/notifications/status?slack_user_id=U060NLFUM&slack_session=${sess}`);
     expect(r.status).toBe(200);
     expect(r.body).toHaveProperty('subscriptions');
     expect(Array.isArray(r.body.subscriptions)).toBe(true);

@@ -161,10 +161,25 @@ export async function runNotifications({ mode = 'daily' } = {}) {
 
     // Only mark "ran today" if at least one sub processed successfully.
     // A total-outage day shouldn't suppress tomorrow's missed-run recovery.
-    if (results.some(r => r.ok)) {
+    // DM-delivery health is tracked SEPARATELY: the checks can keep succeeding
+    // (last_run_at fresh) while every DM dies on a rotated shared Slack token —
+    // the May 2026 silent-breakage mode. /healthz exposes these fields so
+    // outside monitoring can alert on DM staleness specifically.
+    const dmAttempts = results.filter(r => r.dm_sent !== undefined || r.error_dm_sent !== undefined);
+    const dmOk = results.some(r => r.dm_sent || r.error_dm_sent);
+    const firstDmErr = results.find(r => r.dm_error)?.dm_error || null;
+    if (results.some(r => r.ok) || dmAttempts.length) {
       const store = loadStore();
-      if (mode === 'daily') store.last_run_at = new Date().toISOString();
-      else store.last_digest_run_at = new Date().toISOString();
+      if (results.some(r => r.ok)) {
+        if (mode === 'daily') store.last_run_at = new Date().toISOString();
+        else store.last_digest_run_at = new Date().toISOString();
+      }
+      if (dmOk) {
+        store.last_dm_success_at = new Date().toISOString();
+        store.last_dm_error = null;
+      } else if (dmAttempts.length) {
+        store.last_dm_error = `${new Date().toISOString()}: ${firstDmErr || 'unknown'}`;
+      }
       saveStore(store);
     }
     return { ran_at: new Date().toISOString(), mode, results };

@@ -121,8 +121,13 @@ notificationsRouter.post('/api/notifications/disable', wrap(async (req, res) => 
 }));
 
 notificationsRouter.get('/api/notifications/status', (req, res) => {
-  const { slack_user_id } = req.query;
+  const { slack_user_id, slack_session } = req.query;
   if (!slack_user_id) return res.status(400).json({ detail: 'slack_user_id required' });
+  // Same session gate as /enable and /disable: without it, anyone who knows a
+  // Slack user id could read that user's sub metadata (vehicle id/name, times).
+  if (!verifySession(slack_session, slack_user_id)) {
+    return res.status(401).json({ detail: 'Invalid or missing session' });
+  }
   res.json({ subscriptions: loadSubscribedUsers().filter(u => u.slack_user_id === slack_user_id).map(publicUser) });
 });
 

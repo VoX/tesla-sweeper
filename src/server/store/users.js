@@ -36,6 +36,13 @@ function writeAtomic(path, obj) {
   try { writeSync(fd, JSON.stringify(obj, null, 2)); fsyncSync(fd); }
   finally { closeSync(fd); }
   renameSync(tmp, path);
+  // fsync the DIRECTORY too: rename() durability needs the dir entry on disk,
+  // or a power loss can strand a Tesla refresh-token rotation that the server
+  // already committed remotely (= forced re-auth).
+  try {
+    const dfd = openSync(dirname(path), 'r');
+    try { fsyncSync(dfd); } finally { closeSync(dfd); }
+  } catch { /* best-effort: not all platforms allow dir fsync */ }
 }
 
 // Canonical empty user-record shape. /session/create and migrateLegacy

@@ -1,0 +1,34 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// postSlackDM must be a TOTAL function: every failure mode — including a
+// thrown fetch (timeout, DNS, Slack outage) — comes back as { ok:false },
+// because the cron's DM loops sit outside any per-sub try/catch and an
+// escaped throw aborts every remaining sub's DM (fat-review finding).
+vi.mock('../util/fetch.js', () => ({ fetchWithTimeout: vi.fn() }));
+
+const { fetchWithTimeout } = await import('../util/fetch.js');
+const { postSlackDM } = await import('../integrations/slack.js');
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  process.env.SLACK_BOT_TOKEN = 'xoxb-test';
+});
+
+describe('postSlackDM', () => {
+  it('returns ok:false instead of throwing when fetch rejects', async () => {
+    fetchWithTimeout.mockRejectedValue(new Error('ECONNRESET'));
+    await expect(postSlackDM('U123', 'hi')).resolves.toEqual({ ok: false, error: 'ECONNRESET' });
+  });
+
+  it('returns ok:false on a Slack-level error response', async () => {
+    fetchWithTimeout.mockResolvedValue({ json: async () => ({ ok: false, error: 'invalid_auth' }) });
+    const out = await postSlackDM('U123', 'hi');
+    expect(out).toEqual({ ok: false, error: 'invalid_auth' });
+  });
+
+  it('returns ok:true on success', async () => {
+    fetchWithTimeout.mockResolvedValue({ json: async () => ({ ok: true }) });
+    const out = await postSlackDM('U123', 'hi');
+    expect(out.ok).toBe(true);
+  });
+});

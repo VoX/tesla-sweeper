@@ -157,7 +157,8 @@ export default function App() {
 
   const fetchSubscriptions = async (uid) => {
     if (!uid) return;
-    const data = await get(`notifications/status?slack_user_id=${encodeURIComponent(uid)}`)
+    // The status route now requires the same HMAC session as enable/disable.
+    const data = await get(`notifications/status?slack_user_id=${encodeURIComponent(uid)}&slack_session=${encodeURIComponent(slackSession())}`)
       .catch(() => ({ subscriptions: [] }));
     setSubscriptions(data.subscriptions || []);
   };

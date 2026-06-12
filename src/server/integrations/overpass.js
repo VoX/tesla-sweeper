@@ -30,6 +30,7 @@ export async function whichSide(lat, lng) {
       // Only cache definite parity answers — 'unknown' may improve as
       // OSM building data fills in, so let it re-probe.
       if (result.side === 'odd' || result.side === 'even') {
+        if (sideCache.size >= 5000) sideCache.delete(sideCache.keys().next().value);
         sideCache.set(key, { at: Date.now(), value: result });
       }
       return result;

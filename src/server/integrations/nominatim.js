@@ -24,9 +24,16 @@ const reverseCache = new Map();
 // gate otherwise (both compute wait against the same lastCall, both
 // sleep, both fire simultaneously, violating the 1 req/sec rule).
 let nextSlot = 0;
+const MAX_QUEUE_WAIT_MS = 30_000;
 export async function nominatimFetch(url, options) {
   const now = Date.now();
   const fireAt = Math.max(now, nextSlot);
+  // Depth cap: an unbounded backlog lets a request flood queue HOURS of
+  // delay that the daily cron then waits behind. Past ~30 requests deep,
+  // shed load instead of queueing.
+  if (fireAt - now > MAX_QUEUE_WAIT_MS) {
+    throw new Error('Nominatim queue saturated, try later');
+  }
   nextSlot = fireAt + 1000;
   if (fireAt > now) await new Promise(r => setTimeout(r, fireAt - now));
   return fetchWithTimeout(url, options);
@@ -56,6 +63,8 @@ export async function reverseGeocodeLocation(lat, lng) {
     state: a.state || '',
     display_name: data.display_name || '',
   };
+  // Capped LRU-ish: attacker-chosen coordinates must not grow this forever.
+  if (reverseCache.size >= 5000) reverseCache.delete(reverseCache.keys().next().value);
   reverseCache.set(key, { at: Date.now(), value: out });
   return out;
 }

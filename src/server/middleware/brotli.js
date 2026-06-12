@@ -1,4 +1,4 @@
-import { join, extname } from 'path';
+import { join, extname, resolve, sep } from 'path';
 import { statSync } from 'fs';
 
 // Serve a `.br` pre-compressed sibling when the client accepts brotli.
@@ -16,7 +16,10 @@ export function brotliMiddleware(distDir) {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
     const type = BR_TYPES[extname(req.path).toLowerCase()];
     if (!type || !(req.headers['accept-encoding'] || '').includes('br')) return next();
-    const brPath = join(distDir, req.path) + '.br';
+    const brPath = resolve(join(distDir, req.path) + '.br');
+    // Containment: express does not normalize a literal /../ in the request
+    // line, and unlike express.static this handler had no traversal guard.
+    if (!brPath.startsWith(resolve(distDir) + sep)) return next();
     try { statSync(brPath); } catch { return next(); }
     res.set({
       'Content-Encoding': 'br',

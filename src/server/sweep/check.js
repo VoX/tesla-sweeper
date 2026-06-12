@@ -53,7 +53,10 @@ export async function runSweepCheck({ address, today_date, past_noon = false, la
   }
 
   const rawEvents = await fetchSweepEvents(place.place_id, todayStr, future.toISOString().slice(0, 10));
-  const sweepEvents = parseSweepFlags(rawEvents);
+  // Recollect's event ordering is documented (in our own integration notes) as
+  // not guaranteed — daysUntilNext trusts sweepEvents[0], so sort defensively.
+  const sweepEvents = parseSweepFlags(rawEvents)
+    .sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
 
   // OSM-based geometric detection beats houseNum%2 when a car parks
   // across from its own address. Fall back to parity if OSM lacks
