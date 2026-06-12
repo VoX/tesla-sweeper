@@ -25,10 +25,14 @@ describe('NotificationsPanel', () => {
     expect(onDisable).toHaveBeenCalledWith('s1');
   });
 
-  it('when subscribed but the Slack session expired, shows a re-sign-in prompt + button', () => {
-    render(<NotificationsPanel {...base} hasSlackSession={false} enabledForThis={{ id: 's1', vehicle_name: 'X', slack_user_id: 'U1' }} />);
-    expect(screen.getByText(/Slack session has expired/i)).toBeTruthy();
-    expect(screen.getByText('Sign in with Slack')).toBeTruthy();
+  it('when subscribed but the Slack session expired, still offers Disable with no re-sign-in nag', () => {
+    // Disable works via the Tesla session cookie server-side, so an
+    // expired Slack session must not gate it (owner request 2026-06-12).
+    const onDisable = vi.fn();
+    render(<NotificationsPanel {...base} hasSlackSession={false} enabledForThis={{ id: 's1', vehicle_name: 'X', slack_user_id: 'U1' }} onDisable={onDisable} />);
+    expect(screen.queryByText(/Slack session has expired/i)).toBeNull();
+    fireEvent.click(screen.getByText(/Disable Notifications/));
+    expect(onDisable).toHaveBeenCalledWith('s1');
   });
 
   it('not-enabled, not-signed-in: shows the Sign in with Slack flow, Enable disabled, no manual input', () => {

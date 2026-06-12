@@ -138,14 +138,11 @@ describe('POST /api/notifications/run — bearer gate', () => {
 });
 
 describe('GET /api/notifications/status', () => {
-  it('returns 400 without slack_user_id query', async () => {
-    const r = await request(app).get('/api/notifications/status');
-    expect(r.status).toBe(400);
-  });
-
-  it('returns 401 without a valid slack_session (fat-review gate)', async () => {
-    const r = await request(app).get('/api/notifications/status?slack_user_id=U060NLFUM');
-    expect(r.status).toBe(401);
+  it('returns 401 with no proof at all (no session, no cookie)', async () => {
+    const r1 = await request(app).get('/api/notifications/status');
+    expect(r1.status).toBe(401);
+    const r2 = await request(app).get('/api/notifications/status?slack_user_id=U060NLFUM');
+    expect(r2.status).toBe(401);
   });
 
   it('returns 200 with subscriptions array when the session is valid', async () => {
@@ -155,6 +152,73 @@ describe('GET /api/notifications/status', () => {
     expect(r.status).toBe(200);
     expect(r.body).toHaveProperty('subscriptions');
     expect(Array.isArray(r.body.subscriptions)).toBe(true);
+  });
+
+  it('falls back to the Tesla session cookie and returns the cookie-bound sub (expired-Slack-session UX)', async () => {
+    const { createUser, blankUser, deleteUser } = await import('../store/users.js');
+    const { signOpaque } = await import('../crypto/session.js');
+    const u = createUser(blankUser({
+      session_cookie_id: 'sid-status-test', slack_user_id: 'U0COOKIE',
+      vehicle_id: '42', vehicle_name: 'CookieCar',
+    }));
+    try {
+      const r = await request(app).get('/api/notifications/status')
+        .set('Cookie', `session=${signOpaque('sid-status-test')}`);
+      expect(r.status).toBe(200);
+      expect(r.body.subscriptions).toHaveLength(1);
+      expect(r.body.subscriptions[0].slack_user_id).toBe('U0COOKIE');
+      // and a cookie-bound record WITHOUT an active sub yields an empty list
+    } finally {
+      deleteUser(u.id);
+    }
+  });
+});
+
+describe('POST /api/notifications/disable — dual ownership gate', () => {
+  it('returns 403 with no proof at all', async () => {
+    const r = await request(app).post('/api/notifications/disable').send({ id: 'some-id' });
+    expect(r.status).toBe(403);
+  });
+
+  it('accepts the Tesla session cookie for the record it is bound to', async () => {
+    const { createUser, blankUser, loadUserById } = await import('../store/users.js');
+    const { signOpaque } = await import('../crypto/session.js');
+    const u = createUser(blankUser({
+      session_cookie_id: 'sid-disable-test', slack_user_id: 'U0COOKIE',
+      vehicle_id: '42', vehicle_name: 'CookieCar',
+    }));
+    const r = await request(app).post('/api/notifications/disable')
+      .set('Cookie', `session=${signOpaque('sid-disable-test')}`)
+      .send({ id: u.id });
+    expect(r.status).toBe(200);
+    expect(r.body.disabled).toBe(true);
+    // record kept (browser still bound) but the sub fields are cleared
+    expect(loadUserById(u.id).slack_user_id).toBeNull();
+  });
+
+  it('rejects a cookie bound to a DIFFERENT record (no cross-record disable)', async () => {
+    const { createUser, blankUser, deleteUser } = await import('../store/users.js');
+    const { signOpaque } = await import('../crypto/session.js');
+    const victim = createUser(blankUser({ slack_user_id: 'U0VICTIM', vehicle_id: '7' }));
+    const attacker = createUser(blankUser({ session_cookie_id: 'sid-attacker' }));
+    try {
+      const r = await request(app).post('/api/notifications/disable')
+        .set('Cookie', `session=${signOpaque('sid-attacker')}`)
+        .send({ id: victim.id });
+      expect(r.status).toBe(403);
+    } finally {
+      deleteUser(victim.id); deleteUser(attacker.id);
+    }
+  });
+
+  it('still accepts the Slack HMAC session with no cookie (lapsed-Tesla escape hatch)', async () => {
+    const { createUser, blankUser } = await import('../store/users.js');
+    const { signSession } = await import('../crypto/session.js');
+    const u = createUser(blankUser({ slack_user_id: 'U0HMAC', vehicle_id: '9', vehicle_name: 'HmacCar' }));
+    const r = await request(app).post('/api/notifications/disable')
+      .send({ id: u.id, slack_user_id: 'U0HMAC', slack_session: signSession('U0HMAC') });
+    expect(r.status).toBe(200);
+    expect(r.body.disabled).toBe(true);
   });
 });
 

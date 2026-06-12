@@ -124,7 +124,10 @@ export default function App() {
   }, [slackUserId]);
 
   useEffect(() => {
-    if (loggedIn && slackUserId) fetchSubscriptions(slackUserId);
+    // No slackUserId requirement: the status route falls back to the
+    // Tesla session cookie, so a logged-in browser sees its own sub even
+    // with no remembered slack id (e.g. cleared localStorage).
+    if (loggedIn) fetchSubscriptions(slackUserId);
   }, [loggedIn, slackUserId]);
 
   // Any 401 from a tesla-touching call means the BFF session is gone or
@@ -156,9 +159,14 @@ export default function App() {
   };
 
   const fetchSubscriptions = async (uid) => {
-    if (!uid) return;
-    // The status route now requires the same HMAC session as enable/disable.
-    const data = await get(`notifications/status?slack_user_id=${encodeURIComponent(uid)}&slack_session=${encodeURIComponent(slackSession())}`)
+    // uid optional: with a live slack_session the server filters by id;
+    // otherwise it falls back to the Tesla session cookie and returns
+    // the cookie-bound record's own sub — so an expired Slack session
+    // still renders the enabled state + Disable button.
+    const params = new URLSearchParams();
+    if (uid) params.set('slack_user_id', uid);
+    if (slackSession()) params.set('slack_session', slackSession());
+    const data = await get(`notifications/status?${params}`)
       .catch(() => ({ subscriptions: [] }));
     setSubscriptions(data.subscriptions || []);
   };
@@ -211,13 +219,10 @@ export default function App() {
   };
 
   const disableNotifications = async (subId) => {
-    // Disabling is also HMAC-gated — needs a live Slack session, same as
-    // enabling. (Recovery path: re-do "Sign in with Slack", then Disable.
-    // No Tesla session/cookie required for this.)
-    if (!slackSession()) {
-      notifFail('Your Slack session expired — click "Sign in with Slack" above, then Disable.');
-      return;
-    }
+    // No live-Slack-session precheck: the server accepts EITHER the Slack
+    // HMAC session or the Tesla session cookie (riding along on this
+    // same-origin POST) as proof of record ownership. Only if BOTH have
+    // lapsed does the 403 below surface.
     setNotifLoading(true);
     setNotifError('');
     try {

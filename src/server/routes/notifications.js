@@ -1,10 +1,12 @@
 // Subscription endpoints for daily sweep notifications + manual /run.
 //
-// /enable + /disable are HMAC-gated on the Slack session — that's the
-// confused-deputy fix (a Tesla refresh_token alone shouldn't let you
-// subscribe an arbitrary slack_user_id). The Slack HMAC is the ONLY gate
-// on /disable: a user whose Tesla session has expired must still be able
-// to stop the DMs (re-do Slack OIDC → /disable, no Tesla OAuth needed).
+// /enable is HMAC-gated on the Slack session — that's the confused-deputy
+// fix (a Tesla refresh_token alone shouldn't let you subscribe an
+// arbitrary slack_user_id). /status + /disable accept EITHER proof of
+// ownership: the Slack HMAC session (works with a lapsed Tesla session —
+// re-doing Slack OIDC must always be enough to stop the DMs) OR the Tesla
+// session cookie bound to the record (works with a lapsed Slack session —
+// your own record's sub is yours to see and stop).
 //
 // /enable requires a session cookie (the SPA OAuthed via /api/session/create
 // first); the server reuses the cookie-bound record's server-owned
@@ -104,12 +106,17 @@ notificationsRouter.post('/api/notifications/enable', wrap(async (req, res) => {
 
 notificationsRouter.post('/api/notifications/disable', wrap(async (req, res) => {
   const { id, slack_user_id, slack_session } = req.body || {};
-  if (!id || !slack_user_id) return res.status(400).json({ detail: 'id and slack_user_id required' });
-  if (!verifySession(slack_session, slack_user_id)) {
-    return res.status(403).json({ detail: 'Slack session expired or mismatched. Sign in with Slack again.' });
+  if (!id) return res.status(400).json({ detail: 'id required' });
+  // Either proof of record ownership is sufficient (see file header):
+  // Slack HMAC for the record's slack_user_id, or the Tesla session
+  // cookie bound to this very record.
+  const sessionOk = !!slack_user_id && verifySession(slack_session, slack_user_id);
+  const cookieOk = !sessionOk && loadUserBySession(readSessionCookie(req))?.id === id;
+  if (!sessionOk && !cookieOk) {
+    return res.status(403).json({ detail: 'Session expired — sign in with Slack or Tesla to disable.' });
   }
   const user = loadUserById(id);
-  if (!user || user.slack_user_id !== slack_user_id) return res.status(404).json({ detail: 'Subscription not found' });
+  if (!user || (sessionOk && user.slack_user_id !== slack_user_id)) return res.status(404).json({ detail: 'Subscription not found' });
   // Clear the sub fields. Keep the record if a browser session is still
   // bound to it (logged-in-but-unsubscribed); otherwise it's empty —
   // delete it. No Tesla session cookie required: a user whose Tesla
@@ -122,13 +129,22 @@ notificationsRouter.post('/api/notifications/disable', wrap(async (req, res) => 
 
 notificationsRouter.get('/api/notifications/status', (req, res) => {
   const { slack_user_id, slack_session } = req.query;
-  if (!slack_user_id) return res.status(400).json({ detail: 'slack_user_id required' });
-  // Same session gate as /enable and /disable: without it, anyone who knows a
-  // Slack user id could read that user's sub metadata (vehicle id/name, times).
-  if (!verifySession(slack_session, slack_user_id)) {
-    return res.status(401).json({ detail: 'Invalid or missing session' });
+  // Slack-HMAC path: list every sub for the verified slack id.
+  if (slack_user_id && verifySession(slack_session, slack_user_id)) {
+    return res.json({ subscriptions: loadSubscribedUsers().filter(u => u.slack_user_id === slack_user_id).map(publicUser) });
   }
-  res.json({ subscriptions: loadSubscribedUsers().filter(u => u.slack_user_id === slack_user_id).map(publicUser) });
+  // Tesla-cookie fallback: you can always see YOUR OWN record's sub (so
+  // an expired Slack session still renders the enabled state + Disable
+  // button in the SPA). slack_user_id is ignored here — the cookie picks
+  // the record.
+  const cookieUser = loadUserBySession(readSessionCookie(req));
+  if (cookieUser) {
+    const active = cookieUser.slack_user_id && cookieUser.vehicle_id;
+    return res.json({ subscriptions: active ? [publicUser(cookieUser)] : [] });
+  }
+  // No proof at all: keep the gate — without it, anyone who knows a Slack
+  // user id could read that user's sub metadata (vehicle id/name, times).
+  return res.status(401).json({ detail: 'Invalid or missing session' });
 });
 
 // Manual trigger / monitoring endpoint. Same logic the in-process
