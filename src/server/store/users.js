@@ -30,7 +30,7 @@ mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
 // open+write+fsync+close THEN rename so a power-loss between the tmp write
 // and the rename can't leave a zero-byte file (which loadStore would treat
 // as corrupt and move aside, dropping every record on the floor).
-function writeAtomic(path, obj) {
+export function writeAtomic(path, obj) {
   const tmp = path + '.tmp';
   const fd = openSync(tmp, 'w', 0o600);
   try { writeSync(fd, JSON.stringify(obj, null, 2)); fsyncSync(fd); }

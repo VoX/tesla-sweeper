@@ -6,15 +6,19 @@
 
 import { Router } from 'express';
 import { wrap } from '../middleware/errors.js';
+import { rateLimit } from '../middleware/ratelimit.js';
 import { signSession } from '../crypto/session.js';
 import { fetchWithTimeout } from '../util/fetch.js';
 import { mintState, consumeState } from '../util/oauth-state.js';
+import { saveInstall } from '../store/slack-install.js';
 
 const TESLA_APP_CLIENT_ID = process.env.TESLA_CLIENT_ID || '';
 const TESLA_APP_REDIRECT_URI = process.env.TESLA_REDIRECT_URI || '';
 const SLACK_CLIENT_ID = process.env.SLACK_CLIENT_ID || '';
 const SLACK_CLIENT_SECRET = process.env.SLACK_CLIENT_SECRET || '';
 const SLACK_REDIRECT_URI = process.env.SLACK_REDIRECT_URI || '';
+const SLACK_INSTALL_REDIRECT_URI = process.env.SLACK_INSTALL_REDIRECT_URI || '';
+const SLACK_TEAM_ID = process.env.SLACK_TEAM_ID || '';
 
 export const oauthRouter = Router();
 
@@ -42,6 +46,56 @@ oauthRouter.post('/api/slack/oauth/start', (req, res) => {
   });
   res.json({ url: `https://slack.com/openid/connect/authorize?${params}`, state });
 });
+
+// Bot-install flow ("Add to Slack") — distinct from the OIDC sign-in
+// above: this mints the workspace xoxb token the cron DMs run on. The
+// callback persists it server-side (data/slack-install.json, file-first
+// in integrations/slack.js) so no human ever handles the token; a
+// reinstall/rescope is just re-running this flow.
+oauthRouter.post('/api/slack/oauth/install/start', (req, res) => {
+  if (!SLACK_CLIENT_ID || !SLACK_INSTALL_REDIRECT_URI) return res.status(500).json({ detail: 'Slack install not configured' });
+  const state = mintState('slack-install');
+  if (!state) return res.status(503).json({ detail: 'OAuth state registry full — try again' });
+  const params = new URLSearchParams({
+    client_id: SLACK_CLIENT_ID,
+    scope: 'chat:write,im:write',
+    redirect_uri: SLACK_INSTALL_REDIRECT_URI,
+    state,
+  });
+  res.json({ url: `https://slack.com/oauth/v2/authorize?${params}`, state });
+});
+
+oauthRouter.get('/api/slack/oauth/install-callback', rateLimit({ perMinute: 6 }), wrap(async (req, res) => {
+  const { code, state } = req.query;
+  if (!code) return res.status(400).json({ detail: 'code required' });
+  if (!consumeState(state, 'slack-install')) return res.status(400).json({ detail: 'invalid or expired state' });
+  const tokenRes = await fetchWithTimeout('https://slack.com/api/oauth.v2.access', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: SLACK_CLIENT_ID,
+      client_secret: SLACK_CLIENT_SECRET,
+      redirect_uri: SLACK_INSTALL_REDIRECT_URI,
+      code,
+    }).toString(),
+  });
+  const data = await tokenRes.json();
+  if (!data.ok) throw new Error(data.error || 'Slack install exchange failed');
+  // Workspace pin: anyone can walk this flow against their OWN workspace
+  // (install/start is unauthenticated, matching the other start routes) —
+  // without the pin, the resulting foreign token would clobber ours and
+  // silently kill every DM. Reject any team but the configured one.
+  if (SLACK_TEAM_ID && data.team?.id !== SLACK_TEAM_ID) return res.status(403).json({ detail: 'wrong workspace' });
+  if (!data.access_token) throw new Error('Slack install: no access_token in response');
+  saveInstall({
+    access_token: data.access_token,
+    bot_user_id: data.bot_user_id || null,
+    team_id: data.team?.id || null,
+    team_name: data.team?.name || null,
+    scope: data.scope || null,
+  });
+  res.type('text/plain').send('sweeper installed — bot token captured server-side. you can close this tab.');
+}));
 
 oauthRouter.post('/api/slack/oauth/callback', wrap(async (req, res) => {
   const { code, state } = req.body;
