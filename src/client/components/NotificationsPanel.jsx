@@ -3,7 +3,7 @@
 // with Slack" flow. The slack id comes ONLY from that OIDC sign-in —
 // there's no manual-entry field (a free-text input here got autofilled
 // by password managers and poisoned the id).
-export function NotificationsPanel({ slackUserId, hasSlackSession, enabledForThis, notifLoading, notifError, onSlackSignIn, onEnable, onDisable }) {
+export function NotificationsPanel({ slackUserId, hasSlackSession, enabledForThis, staleSub, targetName, notifLoading, notifError, onSlackSignIn, onEnable, onDisable }) {
   // /enable needs a live Slack-OIDC HMAC session, not just a remembered
   // slack id. /disable doesn't — the Tesla session cookie is enough.
   const signedIn = !!slackUserId && hasSlackSession;
@@ -22,6 +22,26 @@ export function NotificationsPanel({ slackUserId, hasSlackSession, enabledForThi
           </p>
           <button className="disconnect-btn" onClick={() => onDisable(enabledForThis.id)} disabled={notifLoading}>
             {notifLoading ? 'Disabling...' : 'Disable Notifications'}
+          </button>
+        </>
+      ) : staleSub ? (
+        // The pings point at a car this account doesn't have any more. One
+        // button moves them (Enable clears the old sub server-side); Slack
+        // sign-in comes first because /enable needs a live Slack session.
+        <>
+          <p style={{ fontSize: '0.85rem', marginBottom: 12, color: '#d29922' }}>
+            ⚠️ Your pings are still set up for <strong>{staleSub.vehicle_name}</strong>, which isn't on this Tesla account any more — so they've stopped.
+          </p>
+          {!signedIn && (
+            <button onClick={onSlackSignIn} disabled={notifLoading} style={{ marginBottom: 12 }}>
+              {notifLoading ? 'Connecting to Slack...' : 'Sign in with Slack to move them'}
+            </button>
+          )}
+          <button onClick={onEnable} disabled={notifLoading || !signedIn || !targetName}>
+            {notifLoading ? 'Moving...' : targetName ? `Move pings to ${targetName}` : 'Pick a car above, then move pings'}
+          </button>
+          <button className="disconnect-btn" onClick={() => onDisable(staleSub.id)} disabled={notifLoading} style={{ marginTop: 8 }}>
+            Turn pings off instead
           </button>
         </>
       ) : (

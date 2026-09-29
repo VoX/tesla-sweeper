@@ -10,6 +10,17 @@ const TABS = [
   { id: 'manual', icon: '🗺️', label: 'Manual' },
 ];
 
+
+// A sub whose car is no longer on this Tesla account (sold, traded in): the
+// cron 404s on it every run. The panel offers to move the pings to the car
+// the account has now -- /enable clears the old sub in the same step.
+// The test stub is never "gone" (it isn't on any real account).
+export function staleSubscription(subscriptions, vehicles) {
+  if (!subscriptions?.length || !vehicles?.length) return null;
+  return subscriptions.find(s => s.vehicle_id && s.vehicle_id !== '999999999999999'
+    && !vehicles.some(v => v.id === s.vehicle_id)) || null;
+}
+
 export default function App() {
   const [tab, setTab] = useState(() => {
     const p = new URLSearchParams(window.location.search).get('tab');
@@ -571,6 +582,14 @@ export default function App() {
               {vehicles?.length === 0 && (
                 <p style={{fontSize: '0.85rem', color: '#8b949e', marginBottom: 16}}>No vehicles registered on this Tesla account. Add a vehicle in the Tesla app and try again.</p>
               )}
+              {vehicles?.length === 1 && (
+                // One car: nothing to choose, but say WHICH car -- after a car swap the
+                // only way to notice the pings still point at the old one is to see the
+                // new one named here.
+                <p style={{fontSize: '0.85rem', color: '#8b949e', marginBottom: 12}}>
+                  Your car: <strong style={{color: '#c9d1d9'}}>{vehicles[0].name}</strong>{vehicles[0].is_stub ? ' (test)' : ''} ({vehicles[0].state})
+                </p>
+              )}
               {vehicles?.length > 1 && (
                 <div style={{marginBottom: 16}}>
                   <label>Select Vehicle</label>
@@ -589,6 +608,8 @@ export default function App() {
                   slackUserId={slackUserId}
                   hasSlackSession={!!slackSession()}
                   enabledForThis={subscriptions?.find(s => s.vehicle_id === (selectedVehicle || vehicles[0].id))}
+                  staleSub={staleSubscription(subscriptions, vehicles)}
+                  targetName={(vehicles.find(v => v.id === selectedVehicle) || (vehicles.length === 1 ? vehicles[0] : null))?.name || null}
                   notifLoading={notifLoading}
                   notifError={notifError}
                   onSlackSignIn={handleSlackSignIn}

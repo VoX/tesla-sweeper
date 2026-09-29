@@ -18,7 +18,7 @@ import { fetchWithTimeout } from '../util/fetch.js';
 import { escapeSlack } from '../integrations/slack.js';
 import { rateLimit } from '../middleware/ratelimit.js';
 import { checkSubNow, todayInET } from '../notifications/cron.js';
-import { formatPlanDM, shouldDispatchPlan } from '../notifications/planner.js';
+import { formatPlanDM, shouldDispatchPlan, formatVehicleGoneDM } from '../notifications/planner.js';
 
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET || '';
 const SIGNATURE_WINDOW_S = 300;
@@ -43,6 +43,8 @@ export function verifySlackSignature({ signingSecret, signature, timestamp, rawB
 // Compose the slash-command result from a completed check.
 export function formatCommandResult(out) {
   if (!out.ok) {
+    // "Try again in a minute" is wrong advice for a car that's gone from the account.
+    if (out.error_class === 'VehicleGoneError') return formatVehicleGoneDM(out);
     return `:warning: check failed: ${escapeSlack(out.error || 'unknown error')}. Try again in a minute, or use <https://sweeper.bitvox.me/>.`;
   }
   if (!out.found) {

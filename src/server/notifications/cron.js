@@ -20,12 +20,12 @@
 import cron from 'node-cron';
 import {
   classifyWeek, shouldDispatchPlan, formatPlanDM, formatWeeklyDigest,
-  formatDayOfDM, formatSeasonPreviewDM, isOffSeason, isSeasonPreviewWindow,
+  formatDayOfDM, formatSeasonPreviewDM, formatVehicleGoneDM, isOffSeason, isSeasonPreviewWindow,
 } from './planner.js';
 import { loadStore, saveStore, patchUser, loadSubscribedUsers, pruneOrphaned } from '../store/users.js';
 import {
   STUB_VEHICLE_LAT, STUB_VEHICLE_LNG,
-  isStubVehicle, fetchVehicleData,
+  isStubVehicle, fetchVehicleData, listVehicles,
 } from '../integrations/tesla.js';
 import { getTeslaAccess } from '../integrations/tesla-auth.js';
 import { reverseGeocodeLocation } from '../integrations/nominatim.js';
@@ -38,6 +38,10 @@ const STUCK_DM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 // DMing the USER about. Everything else (Tesla 5xx, OSM down, Recollect
 // drift) goes to the operator instead: wrong audience, wrong remedy.
 const REAUTH_ERROR_CLASSES = ['RevokedError', 'ConfigError'];
+// A car that's gone from the account is permanent and only the user can
+// fix it (pick the new car), so it goes to the USER -- and sooner: two
+// consecutive runs (a noon + evening pair), not the three a flaky class gets.
+const VEHICLE_GONE_THRESHOLD = 2;
 const OPERATOR_SLACK_ID = process.env.OPERATOR_SLACK_ID || '';
 
 const MODES = ['daily', 'evening', 'dayof', 'weekly'];
@@ -58,6 +62,7 @@ export const planDmKey = (todayET, plan) =>
 // /sweep slash command calls this directly and must not touch streaks).
 export async function checkSubNow(sub, todayET) {
   const out = { sub_id: sub.id, slack_user_id: sub.slack_user_id, vehicle_id: sub.vehicle_id, vehicle_name: sub.vehicle_name };
+  let access = null;
   try {
     let latitude, longitude;
     if (isStubVehicle(sub.vehicle_id)) {
@@ -69,7 +74,7 @@ export async function checkSubNow(sub, todayET) {
     } else {
       // getTeslaAccess owns refresh-token rotation + persistence and
       // throws RevokedError / ConfigError / TransientError.
-      const access = await getTeslaAccess(sub.id);
+      access = await getTeslaAccess(sub.id);
       const headers = { Authorization: `Bearer ${access}`, 'Content-Type': 'application/json' };
       const locData = await fetchVehicleData(headers, sub.vehicle_id);
       ({ latitude, longitude } = locData.response?.drive_state || {});
@@ -109,6 +114,13 @@ export async function checkSubNow(sub, todayET) {
     // Taxonomy tag (RevokedError/ConfigError/TransientError) or plain
     // 'Error' — drives who gets the stuck-sub DM.
     out.error_class = e.name || 'Error';
+    // The car is gone: name what IS on the account, so the DM can say
+    // "you now have KittlaTres" instead of leaving the user to guess.
+    // Read-only list call on the same access token; best-effort.
+    if (out.error_class === 'VehicleGoneError' && access) {
+      try { out.account_vehicles = (await listVehicles(access)).filter(v => !v.is_stub).map(v => v.name); }
+      catch { out.account_vehicles = null; }
+    }
   }
   out.plan = (out.ok && out.found) ? classifyWeek({
     events: out.sweep_events, carSide: out.car_side,
@@ -264,11 +276,14 @@ export async function runNotifications({ mode = 'daily', todayET: todayOverride 
     // transient infrastructure streaks go to the operator instead.
     if (mode === 'daily') {
       for (const out of results) {
-        if (out.ok || out.consecutive_failures < STUCK_FAIL_THRESHOLD) continue;
+        const threshold = out.error_class === 'VehicleGoneError' ? VEHICLE_GONE_THRESHOLD : STUCK_FAIL_THRESHOLD;
+        if (out.ok || out.consecutive_failures < threshold) continue;
         const lastErrTs = out.last_dm_error_at ? Date.parse(out.last_dm_error_at) : 0;
         if (Date.now() - lastErrTs < STUCK_DM_COOLDOWN_MS) continue;
         let dm;
-        if (REAUTH_ERROR_CLASSES.includes(out.error_class)) {
+        if (out.error_class === 'VehicleGoneError') {
+          dm = await postSlackDM(out.slack_user_id, formatVehicleGoneDM(out));
+        } else if (REAUTH_ERROR_CLASSES.includes(out.error_class)) {
           dm = await postSlackDM(out.slack_user_id,
             `:warning: *${escapeSlack(out.vehicle_name)}* sweeper notifications have been failing for ${out.consecutive_failures} runs (${out.error_class === 'RevokedError' ? 'Tesla authorization expired or revoked' : 'app configuration problem'}). Re-enable at <https://sweeper.bitvox.me/>.`);
         } else if (OPERATOR_SLACK_ID) {

@@ -81,9 +81,24 @@ export async function listVehicles(accessToken) {
   return out;
 }
 
+// A vehicle id the account no longer has (sold, traded in, removed from
+// the account): Tesla answers vehicle_data with 404. Tagged so the cron
+// can tell the USER to pick their car again -- a permanent, user-fixable
+// state -- instead of paging the operator every day (kit's KitlaDos ->
+// KittlaTres, 2026-09: 18 silent runs). The message keeps the old
+// 'vehicle_data 404' text so log greps still match.
+export class VehicleGoneError extends Error {
+  constructor(vid) {
+    super('vehicle_data 404');
+    this.name = 'VehicleGoneError';
+    this.vehicle_id = String(vid);
+  }
+}
+
 // Fetch vehicle_data with location + charge_state. Wakes the car if it
-// returns 408 (asleep) and retries once. Throws on anything that
-// doesn't parse to a usable response.
+// returns 408 (asleep) and retries once. Throws VehicleGoneError on 404,
+// and a plain Error on anything else that doesn't parse to a usable
+// response.
 export async function fetchVehicleData(headers, vid) {
   const url = `${TESLA_BASE}/api/1/vehicles/${vid}/vehicle_data?${VEHICLE_DATA_QS}`;
   let res = await fetchWithTimeout(url, { headers });
@@ -92,6 +107,7 @@ export async function fetchVehicleData(headers, vid) {
     if (!await teslaWakeAndPoll(headers, vid)) throw new Error('Vehicle did not wake within 60s');
     res = await fetchWithTimeout(url, { headers });
   }
+  if (res.status === 404) throw new VehicleGoneError(vid);
   if (!res.ok) throw new Error(`vehicle_data ${res.status}`);
   return res.json();
 }

@@ -28,6 +28,7 @@ vi.mock('../integrations/tesla.js', () => ({
   // SUB fixture below has vehicle_id = '999999999999999' (the stub id).
   isStubVehicle: (id) => String(id) === '999999999999999',
   fetchVehicleData: vi.fn(),
+  listVehicles: vi.fn(),
 }));
 
 vi.mock('../integrations/tesla-auth.js', () => ({
@@ -69,7 +70,7 @@ const SWEEP_T3 = {
 const { loadStore, patchUser, loadSubscribedUsers } = await import('../store/users.js');
 const { postSlackDM } = await import('../integrations/slack.js');
 const { getTeslaAccess } = await import('../integrations/tesla-auth.js');
-const { fetchVehicleData } = await import('../integrations/tesla.js');
+const { fetchVehicleData, listVehicles } = await import('../integrations/tesla.js');
 const { runNotifications, planDmKey } = await import('../notifications/cron.js');
 
 const SUB = {
@@ -305,6 +306,54 @@ describe('stuck-sub DM class routing', () => {
     failingSub('RevokedError');
     await run({ mode: 'evening' });
     expect(postSlackDM).not.toHaveBeenCalled();
+  });
+});
+
+describe('a car that is gone from the account (vehicle_data 404)', () => {
+  // The car on the sub was sold / traded: getTeslaAccess works, vehicle_data 404s.
+  const goneSub = (priorFails, onAccount) => {
+    loadSubscribedUsers.mockReturnValue([{ ...SUB, vehicle_id: '3744614764253136', vehicle_name: 'KitlaDos', consecutive_failures: priorFails }]);
+    getTeslaAccess.mockResolvedValue('ACCESS');
+    const err = new Error('vehicle_data 404');
+    err.name = 'VehicleGoneError';
+    fetchVehicleData.mockRejectedValue(err);
+    listVehicles.mockResolvedValue(onAccount.map((name, i) => ({ id: String(i + 1), name, state: 'asleep' })));
+  };
+
+  it('DMs the USER after two runs, naming the car now on the account and the button that fixes it', async () => {
+    goneSub(1, ['KittlaTres']);
+    const out = await run({ mode: 'daily' });
+    expect(out.results[0].error_class).toBe('VehicleGoneError');
+    expect(out.results[0].account_vehicles).toEqual(['KittlaTres']);
+    const [to, text] = postSlackDM.mock.calls.find(([t]) => t === 'U060NLFUM');
+    expect(to).toBe('U060NLFUM');
+    expect(text).toContain('KitlaDos');
+    expect(text).toContain('Move pings to KittlaTres');
+    // Not the operator: this one is the user's to fix.
+    expect(postSlackDM.mock.calls.filter(([t]) => t === 'U0OPERATOR')).toHaveLength(0);
+  });
+
+  it('control: a plain Error on the same streak still goes to the operator', async () => {
+    goneSub(2, ['KittlaTres']);
+    const err = new Error('vehicle_data 500');
+    fetchVehicleData.mockRejectedValue(err);
+    await run({ mode: 'daily' });
+    expect(postSlackDM).toHaveBeenCalledWith('U0OPERATOR', expect.stringContaining('vehicle_data 500'));
+    expect(postSlackDM.mock.calls.filter(([t]) => t === 'U060NLFUM')).toHaveLength(0);
+  });
+
+  it('waits for the second run: one 404 alone DMs nobody', async () => {
+    goneSub(0, ['KittlaTres']);
+    await run({ mode: 'daily' });
+    expect(postSlackDM).not.toHaveBeenCalled();
+  });
+
+  it('when the account list cannot be read, still tells the user what to do', async () => {
+    goneSub(1, []);
+    listVehicles.mockRejectedValue(new Error('down'));
+    await run({ mode: 'daily' });
+    const [, text] = postSlackDM.mock.calls.find(([t]) => t === 'U060NLFUM');
+    expect(text).toContain('If you changed cars');
   });
 });
 

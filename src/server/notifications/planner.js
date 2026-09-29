@@ -294,3 +294,18 @@ function oneSidedStreet(sideDetection) {
 function nextOppositeAfter(events, side, date) {
   return events.find(e => e.side === side && e.date > date)?.date || null;
 }
+
+// The car on the sub isn't on the Tesla account any more. Say which car
+// IS there when we know, and name the exact button that fixes it.
+export function formatVehicleGoneDM(out) {
+  const gone = `*${escapeSlack(out.vehicle_name || 'your car')}*`;
+  const names = (out.account_vehicles || []).map(n => `*${escapeSlack(n)}*`);
+  const head = `:warning: I can't find ${gone} on your Tesla account any more, so your street-sweeping pings have stopped.`;
+  if (names.length === 1) {
+    return `${head} Your account has ${names[0]} now — open <https://sweeper.bitvox.me/>, sign in with Slack in the pings panel, and tap *Move pings to ${escapeSlack(out.account_vehicles[0])}*.`;
+  }
+  if (names.length > 1) {
+    return `${head} Your account has ${names.join(', ')} — open <https://sweeper.bitvox.me/>, pick the car, sign in with Slack in the pings panel, and tap *Move pings*.`;
+  }
+  return `${head} If you changed cars, open <https://sweeper.bitvox.me/>, sign in with Slack in the pings panel, and turn pings on for the new one.`;
+}

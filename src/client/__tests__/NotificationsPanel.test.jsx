@@ -65,4 +65,39 @@ describe('NotificationsPanel', () => {
     render(<NotificationsPanel {...base} notifError="Slack session expired" />);
     expect(screen.getByText(/Slack session expired/)).toBeTruthy();
   });
+
+  // ⭐ A car swap (kit, 2026-09: KitlaDos -> KittlaTres). The sub points at a car the account
+  // no longer has; the panel must say so and offer the one-click move.
+  const stale = { id: 'old', vehicle_name: 'KitlaDos', vehicle_id: '3744614764253136', slack_user_id: 'U060NLFUM' };
+
+  it('stale sub, signed in: names the gone car and moves the pings to the current one', () => {
+    const onEnable = vi.fn();
+    const { container } = render(<NotificationsPanel {...base} slackUserId="U060NLFUM" hasSlackSession staleSub={stale} targetName="KittlaTres" onEnable={onEnable} />);
+    expect(container.textContent).toContain("KitlaDos, which isn't on this Tesla account any more");
+    const move = screen.getByText('Move pings to KittlaTres');
+    expect(move.disabled).toBe(false);
+    fireEvent.click(move);
+    expect(onEnable).toHaveBeenCalled();
+  });
+
+  it('stale sub, not signed in: Slack sign-in first, the move waits for it', () => {
+    const onSlackSignIn = vi.fn();
+    render(<NotificationsPanel {...base} staleSub={stale} targetName="KittlaTres" onSlackSignIn={onSlackSignIn} />);
+    expect(screen.getByText('Move pings to KittlaTres').disabled).toBe(true);
+    fireEvent.click(screen.getByText('Sign in with Slack to move them'));
+    expect(onSlackSignIn).toHaveBeenCalled();
+  });
+
+  it('stale sub can be turned off instead', () => {
+    const onDisable = vi.fn();
+    render(<NotificationsPanel {...base} staleSub={stale} targetName="KittlaTres" onDisable={onDisable} />);
+    fireEvent.click(screen.getByText('Turn pings off instead'));
+    expect(onDisable).toHaveBeenCalledWith('old');
+  });
+
+  it('control: an enabled sub for this car wins over a stale one', () => {
+    render(<NotificationsPanel {...base} hasSlackSession enabledForThis={{ id: 's1', vehicle_name: 'KittlaTres', slack_user_id: 'U060NLFUM' }} staleSub={stale} targetName="KittlaTres" />);
+    expect(screen.queryByText(/Move pings/)).toBeNull();
+    expect(screen.getByText(/Disable Notifications/)).toBeTruthy();
+  });
 });
